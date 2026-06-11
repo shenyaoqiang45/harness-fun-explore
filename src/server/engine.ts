@@ -8,6 +8,7 @@ import type {
   RoundResult,
   SessionState,
 } from "../shared/types.js";
+import { resolveKeepThroughRound } from "../shared/display-tree.js";
 import { TraceStore } from "./trace-store.js";
 
 export interface EngineDeps {
@@ -88,6 +89,16 @@ export class ExplorationEngine {
       throw new Error("Root node not found.");
     }
 
+    const existingRoundIndex = session.rounds.findIndex((round) => round.rootNodeId === rootNodeId);
+    if (existingRoundIndex >= 0) {
+      this.truncateSession(session, existingRoundIndex - 1);
+    } else {
+      const parentRoundIndex = session.rounds.findIndex((round) => round.topNodeIds.includes(rootNodeId));
+      if (parentRoundIndex >= 0 && parentRoundIndex < session.rounds.length - 1) {
+        this.truncateSession(session, parentRoundIndex);
+      }
+    }
+
     const roundId = session.rounds.length + 1;
     session.status = "expanding";
 
@@ -98,7 +109,7 @@ export class ExplorationEngine {
       type: "tool-call-start",
       toolName: "expandKeywords",
       summary: "Expanding into 10 candidates",
-      payload: { rootKeyword: rootNode.keyword },
+      payload: { rootKeyword: rootNode.keyword, rootNodeId },
     });
 
     const candidates = (await this.deps.expandKeywords(rootNode.keyword)).slice(0, 10);
@@ -110,7 +121,7 @@ export class ExplorationEngine {
       status: "ok",
       durationMs: Date.now() - t1,
       summary: "Generated candidate keywords",
-      payload: { candidates },
+      payload: { candidates, rootNodeId },
     });
 
     const scored = [] as Array<{ keyword: string; node: KeywordNode }>;
@@ -128,17 +139,6 @@ export class ExplorationEngine {
 
       const evidence = await this.deps.searchEvidence(keyword);
 
-      this.traces.append({
-        sessionId,
-        roundId,
-        type: "tool-call-end",
-        toolName: "searchEvidence",
-        status: "ok",
-        durationMs: Date.now() - t2,
-        summary: "Evidence collected",
-        payload: { keyword, evidenceCount: evidence.length },
-      });
-
       const score = scoreKeyword({
         semanticRelevance: semanticRelevance(rootNode.keyword, keyword),
         popularity: avgPopularity(evidence),
@@ -154,6 +154,17 @@ export class ExplorationEngine {
         evidence,
         children: [],
       };
+
+      this.traces.append({
+        sessionId,
+        roundId,
+        type: "tool-call-end",
+        toolName: "searchEvidence",
+        status: "ok",
+        durationMs: Date.now() - t2,
+        summary: "Evidence collected",
+        payload: { keyword, evidenceCount: evidence.length, nodeId: node.id },
+      });
 
       scored.push({ keyword, node });
     }
@@ -190,7 +201,7 @@ export class ExplorationEngine {
       roundId,
       type: "llm-output",
       summary: "Direction summary and persona updated",
-      payload: { directionSummary, personaHypothesis },
+      payload: { directionSummary, personaHypothesis, rootNodeId },
     });
 
     const round: RoundResult = {
@@ -214,9 +225,36 @@ export class ExplorationEngine {
       payload: {
         candidateCount: candidates.length,
         selectedCount: round.topNodeIds.length,
+        rootNodeId,
+        topNodeIds: round.topNodeIds,
       },
     });
 
+    return session;
+  }
+
+  backtrace(sessionId: string, nodeId: string): SessionState {
+    const session = this.mustGetSession(sessionId);
+    if (session.status === "confirmed") {
+      throw new Error("Session is already confirmed.");
+    }
+
+    const keepThrough = resolveKeepThroughRound(session, nodeId);
+    this.truncateSession(session, keepThrough);
+
+    this.traces.append({
+      sessionId,
+      roundId: session.rounds.length,
+      type: "round-checkpoint",
+      summary: "Backtrace to earlier layer",
+      payload: {
+        nodeId,
+        keepThroughRound: keepThrough,
+        currentRootNodeId: session.currentRootNodeId,
+      },
+    });
+
+    session.status = "await-user-click";
     return session;
   }
 
@@ -242,7 +280,10 @@ export class ExplorationEngine {
       roundId: session.rounds.length,
       type: "round-checkpoint",
       summary: "Session confirmed",
-      payload: { confirmedPath: session.confirmedPath },
+      payload: {
+        confirmedPath: session.confirmedPath,
+        confirmedNodeId: nodeId,
+      },
     });
 
     return session;
@@ -258,6 +299,50 @@ export class ExplorationEngine {
       throw new Error("Session not found.");
     }
     return session;
+  }
+
+  private truncateSession(session: SessionState, keepThroughRoundIndex: number): void {
+    if (keepThroughRoundIndex < 0) {
+      const root = session.nodes[session.rootNodeId];
+      root.children = [];
+      session.rounds = [];
+      session.currentRootNodeId = session.rootNodeId;
+
+      for (const id of Object.keys(session.nodes)) {
+        if (id !== session.rootNodeId) {
+          delete session.nodes[id];
+        }
+      }
+      return;
+    }
+
+    const keptRounds = session.rounds.slice(0, keepThroughRoundIndex + 1);
+    const keepIds = new Set<string>([session.rootNodeId]);
+
+    for (const round of keptRounds) {
+      keepIds.add(round.rootNodeId);
+      for (const id of round.topNodeIds) {
+        keepIds.add(id);
+      }
+    }
+
+    session.rounds = keptRounds;
+
+    for (const id of Object.keys(session.nodes)) {
+      if (!keepIds.has(id)) {
+        delete session.nodes[id];
+      }
+    }
+
+    for (const id of keepIds) {
+      const node = session.nodes[id];
+      if (node) {
+        node.children = node.children.filter((childId) => keepIds.has(childId));
+      }
+    }
+
+    session.currentRootNodeId =
+      keptRounds[keptRounds.length - 1]?.rootNodeId ?? session.rootNodeId;
   }
 }
 

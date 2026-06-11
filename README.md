@@ -1,181 +1,86 @@
-# 关键词星图探索 MVP
+# Keyword Star Atlas MVP
 
-## 产品设计理念
+[中文文档](README-cn.md)
 
-这是一个“人机共创的探索系统”，不是传统搜索框。
-用户输入一个关键词后，系统不会立刻给出单一答案，而是与用户一起逐轮澄清问题边界：
-先扩展、再筛选、再确认、再递归，最终形成可解释的认知路径。
+A human-in-the-loop exploration system—not a traditional search box. Enter a seed keyword and co-discover direction through recursive clarification: expand, rank, visualize, click, repeat.
 
-我们的核心信念是：
+## Product beliefs
 
-1. 好问题比快答案更重要
-2. 可视化关系比线性列表更能启发思考
-3. 过程透明比“黑箱聪明”更值得信任
+1. Better questions beat faster answers
+2. Relational maps inspire thinking more than linear lists
+3. Transparent process beats opaque “smart” boxes
 
-## 设计北极星
+## North star
 
-帮助用户从“模糊想法”走到“可执行方向”，并且让这个过程可见、可回放、可复盘。
+Help users move from fuzzy intent to actionable direction—with a visible, replayable, auditable path.
 
-衡量标准不是一次命中，而是：
+Success is measured by convergence quality, explainability, and reusable exploration trails—not single-shot hit rate.
 
-1. 用户是否更快收敛到真正关心的主题
-2. 用户是否能理解系统为什么给出这些关键词
-3. 用户是否能在回看轨迹时复用这次思考路径
+## Core loop
 
-## 体验原则
+Each round:
 
-### 1) 递归澄清，而非一次性检索
+1. User picks a focus node
+2. LLM expands 10 candidate keywords
+3. Evidence scoring ranks Top 5
+4. Star-map tree visualizes branches
+5. User clicks a node to recurse—or confirms to freeze the path
 
-每轮固定流程：
+## UX controls
 
-1. 用户给出当前关注点
-2. 大模型扩展最相关的 10 个候选关键词
-3. 系统基于全网证据按综合评分选出 Top 5
-4. 以树状关系可视化给用户确认
-5. 用户点击任意节点继续下一轮
+| Action | Gesture |
+|--------|---------|
+| Expand next round | Click node |
+| Select node to confirm | Shift+click |
+| Freeze path | **Confirm Path** button |
+| Filter trace by round | Ctrl+click node |
+| Highlight tree from trace | Click trace row |
 
-### 2) 人在回路中，用户始终有控制权
+## Explainability
 
-1. 用户决定下一轮从哪个节点展开
-2. 用户可随时确认终止，冻结最终路径
-3. 系统提供建议，不替用户做不可逆决策
+Every round shows:
 
-### 3) 可解释优先
+- **Direction summary** — where the model thinks you are converging
+- **Persona hypothesis** — staged guess at your goal
+- **Evidence scores** — relevance, popularity, authority for Top 5 leaves
 
-每轮都展示：
+Trace panel records LLM outputs and tool calls; rows link bidirectionally to tree nodes (ADR-002).
 
-1. 方向摘要：模型认为用户当前在往哪个方向收敛
-2. 用户画像假设：模型对用户目标阶段性的理解
-3. 证据依据：关键词入选的信号来源与评分构成
+## Visual language
 
-## 轨迹可视化理念
+Dark deep-space canvas, gold orbital links, cool-white highlights—exploration depth flows left → right.
 
-轨迹不是日志页，而是“思考地图”。
+## MVP scope
 
-我们记录并展示两类核心事件：
+- Seed → 10 candidates → Top 5 tree → recursive clicks
+- Direction, persona, evidence per round
+- Full trace timeline with tree linkage
+- Confirm / freeze path
 
-1. 大模型输出事件：扩展词、方向摘要、画像判断
-2. 工具调用事件：检索、打分、排序、状态返回
+Out of scope: auth, multi-user editing, ops rule engine.
 
-轨迹需要满足三件事：
+## Quick start
 
-1. 可追踪：任意结果都能回溯到对应事件链
-2. 可联动：点击轨迹可高亮树节点，点击树节点可过滤轨迹
-3. 可复盘：用户能理解每次分叉为何发生
+```bash
+npm install
+npm run dev    # builds client bundle, serves http://localhost:3000
+npm test
+```
 
-## 视觉语言：星图观测
+Copy [.env.example](.env.example) to `.env` for Kimi or MiniMax. Without keys, the server uses local mock providers.
 
-整体视觉采用“神秘探索”氛围，强调发现感与方向感：
+### LLM providers
 
-1. 暗蓝深空背景，建立未知感
-2. 金色轨道连线，表达推理路径
-3. 冷白高亮节点，突出当前关注点
-4. 轻量星尘动效，传达每轮推进的节奏
+**Kimi:** `KIMI_API_KEY` (+ optional `KIMI_BASE_URL`, `KIMI_MODEL`). Keys prefixed `sk-kimi-` use `https://api.kimi.com/coding/v1`.
 
-目标不是炫技，而是让用户感受到：
+**MiniMax:** `LLM_PROVIDER=minimax`, `MINIMAX_API_KEY` (+ optional base URL / model).
 
-“我正在探索一个有结构的未知空间。”
+Priority: MiniMax (if configured) → Kimi → mock.
 
-## MVP 边界
+## Architecture ADRs
 
-MVP 只验证最关键闭环：
+See [docs/adr/0001-mvp-architecture.md](docs/adr/0001-mvp-architecture.md).
 
-1. 输入关键词 -> 10 候选 -> Top 5 建树 -> 用户递归点击
-2. 每轮展示方向摘要与用户画像
-3. 完整记录模型输出与工具调用轨迹，并在 UI 可见
+## Agent workflow
 
-## 产品设计 ADR
-
-### ADR-001 递归澄清优先于一次命中
-
-- 状态：Accepted
-- 决策：采用“输入关键词 -> 扩展 10 个候选 -> 筛选 Top 5 -> 用户点击递归”的循环流程。
-- 原因：用户初始意图往往模糊，单次检索容易给出看似正确但方向偏差的答案。
-- 取舍：牺牲首屏速度，换取更高的方向收敛质量与可解释性。
-- 影响：系统必须具备轮次状态管理、树节点历史追踪与终止确认机制。
-
-### ADR-002 过程透明优先于黑箱智能
-
-- 状态：Accepted
-- 决策：UI 同步展示 LLM 输出与工具调用轨迹，支持回溯与联动。
-- 原因：用户需要知道“为什么出现这个分支”，团队也需要可复盘的数据链路用于调优。
-- 取舍：增加前后端事件模型复杂度与存储开销。
-- 影响：需要 TraceEvent 模型、按轮次排序、节点与轨迹互相高亮。
-
-### ADR-003 树形主视图采用“左到右深入”
-
-- 状态：Accepted
-- 决策：将探索深度映射为横向坐标，左侧表示浅层，右侧表示深入。
-- 原因：符合时间与路径直觉，用户更易理解每轮推进关系。
-- 取舍：弱化自由布局的美观弹性，增强结构可读性。
-- 影响：树渲染需要固定 depth 间距，并突出每轮 root 节点。
-
-### ADR-004 每轮展示 root，主展示最后一轮叶节点
-
-- 状态：Accepted
-- 决策：树上串联展示每轮 root 关键词，同时将最后一轮叶节点作为当前决策面板。
-- 原因：既保留探索路径，又避免全量历史叶子造成视觉噪音。
-- 取舍：历史分支细节不在主视图常驻，需要通过轨迹或回放查看。
-- 影响：前端需按 round 构建显示树，支持最后一轮节点的交互扩展。
-
-### ADR-005 叶节点必须显示热度
-
-- 状态：Accepted
-- 决策：在最后一轮叶节点标签中显示热度值（0-100）。
-- 原因：帮助用户快速比较候选方向的关注度差异，提升选择效率。
-- 取舍：界面信息密度增加，需要控制标签长度与视觉层级。
-- 影响：评分字段需暴露 popularity，前端标签渲染与排序按热度支持。
-
-### ADR-006 模型提供方可切换，默认支持 MiniMax 与 Kimi
-
-- 状态：Accepted
-- 决策：通过环境变量切换 provider，支持 MiniMax、Kimi 与本地 mock 回退。
-- 原因：降低供应商风险，避免单一模型不可用导致产品整体不可用。
-- 取舍：接入层抽象和配置复杂度上升。
-- 影响：provider 路由、鉴权配置、错误提示与降级路径必须标准化。
-
-## Kimi 接入
-
-系统已支持 Kimi 作为大模型提供方（用于关键词扩展、方向摘要、用户画像推断）。
-
-配置方式：
-
-1. 复制 [.env.example](.env.example) 并设置环境变量
-2. 设置 KIMI_API_KEY
-3. 可选设置 KIMI_BASE_URL 与 KIMI_MODEL
-
-未设置 KIMI_API_KEY 时，系统会自动回退到本地 mock 逻辑，便于离线开发与测试。
-
-说明：
-
-1. 当 key 前缀为 `sk-kimi-` 时，系统会自动使用 `https://api.kimi.com/coding/v1` 与 `kimi-for-coding`。
-2. 其他 `sk-` key 默认使用 `https://api.moonshot.cn/v1`。
-
-## MiniMax 接入
-
-系统已支持通过环境变量切换到 MiniMax。
-
-配置方式：
-
-1. 设置 `LLM_PROVIDER=minimax`
-2. 设置 `MINIMAX_API_KEY`
-3. 可选设置 `MINIMAX_BASE_URL` 与 `MINIMAX_MODEL`
-
-默认优先级：
-
-1. `LLM_PROVIDER=minimax` 或存在 `MINIMAX_API_KEY` 时使用 MiniMax
-2. 否则使用 Kimi（若提供 `KIMI_API_KEY`）
-3. 都未提供时回退本地 mock
-
-暂不追求：
-
-1. 企业级权限系统
-2. 多人协作编辑
-3. 自动化运营规则引擎
-
-## 为什么这个产品值得做
-
-在信息爆炸时代，用户真正缺少的不是更多结果，而是“更好的探索结构”。
-
-这个产品通过树状关系、递归澄清和过程透明，把“找答案”升级为“构建理解”。
-当用户能看见自己的思考如何一步步收敛，工具就不只是搜索引擎，而是认知放大器。
+Issues and PRDs live under `.scratch/`. See [AGENTS.md](AGENTS.md) and [CONTEXT.md](CONTEXT.md).

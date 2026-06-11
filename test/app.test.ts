@@ -105,4 +105,49 @@ describe("HTTP API", () => {
 
     expect(response.statusCode).toBe(404);
   });
+
+  it("serves client and shared browser modules", async () => {
+    const client = await app.inject({ method: "GET", url: "/client.js" });
+    expect(client.statusCode).toBe(200);
+    expect(client.headers["content-type"]).toContain("javascript");
+    expect(client.body).toContain("buildTreeLayout");
+
+    const displayTree = await app.inject({ method: "GET", url: "/shared/display-tree.js" });
+    expect(displayTree.statusCode).toBe(200);
+    expect(displayTree.body).toContain("buildSessionDisplayTree");
+
+    const treeLayout = await app.inject({ method: "GET", url: "/shared/tree-layout.js" });
+    expect(treeLayout.statusCode).toBe(200);
+    expect(treeLayout.body).toContain("buildTreeLayout");
+
+    const starLayout = await app.inject({ method: "GET", url: "/shared/star-layout.js" });
+    expect(starLayout.statusCode).toBe(200);
+    expect(starLayout.body).toContain("buildStarLayout");
+  });
+
+  it("backtraces through the HTTP API", async () => {
+    const start = await app.inject({
+      method: "POST",
+      url: "/api/start",
+      payload: { keyword: "backtrace" },
+    });
+    const session = start.json() as { sessionId: string; rootNodeId: string; rounds: Array<{ topNodeIds: string[] }> };
+    const leafId = session.rounds[0].topNodeIds[0];
+
+    await app.inject({
+      method: "POST",
+      url: "/api/expand",
+      payload: { sessionId: session.sessionId, rootNodeId: leafId },
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/backtrace",
+      payload: { sessionId: session.sessionId, nodeId: session.rootNodeId },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as { rounds: unknown[] };
+    expect(body.rounds).toHaveLength(1);
+  });
 });

@@ -10,15 +10,16 @@
 - **Decision:** UI shows LLM output and tool-call trace with bidirectional tree linkage.
 - **Consequence:** TraceEvent model, timeline API, highlight interactions.
 
-# ADR-003: Left-to-Right Tree Depth
+# ADR-003: Top-Down Frontier Layout
+
+- **Status:** Accepted (supersedes horizontal depth axis)
+- **Decision:** Current root at top, decision leaves on the bottom row.
+
+# ADR-004: Frontier View (Current Root + Leaves)
 
 - **Status:** Accepted
-- **Decision:** Exploration depth maps to horizontal axis (shallow left, deep right).
-
-# ADR-004: Round Roots + Latest Leaves in Main View
-
-- **Status:** Accepted
-- **Decision:** Chain round roots; show only the latest round's leaves as decision panel.
+- **Decision:** Main tree shows only the **current round root** and its **Top-5 leaves**. Full exploration history stays in session state and side panels; path navigation uses a breadcrumb with backtrace.
+- **Consequence:** `buildFrontierDisplayTree`, breadcrumb UI, `/api/backtrace`.
 
 # ADR-005: Leaf Heat Display
 

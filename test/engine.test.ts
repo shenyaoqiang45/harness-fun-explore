@@ -52,6 +52,31 @@ describe("ExplorationEngine", () => {
     expect(expanded.status).toBe("await-user-click");
   });
 
+  it("backtraces to an earlier layer and removes deeper rounds", async () => {
+    const engine = new ExplorationEngine(makeDeps(), new TraceStore());
+    const session = await engine.start("harness");
+    const firstLeaf = session.rounds[0].topNodeIds[0];
+    const expanded = await engine.expand(session.sessionId, firstLeaf);
+    expect(expanded.rounds).toHaveLength(2);
+
+    const rewound = engine.backtrace(session.sessionId, session.rootNodeId);
+    expect(rewound.rounds).toHaveLength(1);
+    expect(Object.keys(rewound.nodes)).toHaveLength(6);
+    expect(rewound.currentRootNodeId).toBe(session.rootNodeId);
+  });
+
+  it("switches branch when expanding from a sibling leaf", async () => {
+    const engine = new ExplorationEngine(makeDeps(), new TraceStore());
+    const session = await engine.start("harness");
+    const firstLeaf = session.rounds[0].topNodeIds[0];
+    const siblingLeaf = session.rounds[0].topNodeIds[1];
+    await engine.expand(session.sessionId, firstLeaf);
+    const switched = await engine.expand(session.sessionId, siblingLeaf);
+
+    expect(switched.rounds).toHaveLength(2);
+    expect(switched.rounds[1].rootNodeId).toBe(siblingLeaf);
+  });
+
   it("passes current round context to persona inference on the first round", async () => {
     let roundsSeen = -1;
     const engine = new ExplorationEngine(

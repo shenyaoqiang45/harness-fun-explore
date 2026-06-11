@@ -20,3 +20,4 @@ After modifying code:
 
 - 测试命令：`npm test`（Vitest）
 - 改代码后运行完整测试套件，失败则修复直至通过
+- UI/服务端改动后另见 `.cursor/rules/browser-verify.mdc`：打开 **http://localhost:3000** 做浏览器验证

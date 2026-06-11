@@ -5,7 +5,7 @@
   "main": "dist/server/index.js",
   "scripts": {
     "build": "tsc --project tsconfig.json",
-    "dev": "tsx src/server/index.ts",
+    "dev": "npm run build && tsx src/server/index.ts",
     "test": "vitest run"
   },
   "keywords": [],

@@ -89,3 +89,8 @@ export interface ConfirmRequest {
   sessionId: string;
   nodeId: string;
 }
+
+export interface BacktraceRequest {
+  sessionId: string;
+  nodeId: string;
+}

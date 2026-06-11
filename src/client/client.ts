@@ -1,12 +1,33 @@
+import {
+  buildFrontierDisplayTree,
+  buildPathBreadcrumb,
+  isCurrentRootBacktraceTarget,
+  parentBacktraceNodeId,
+} from "../shared/display-tree.js";
+import {
+  buildTreeLayout,
+  computeViewBox,
+  treeLinkPath,
+  type PlacedNode,
+  type TreeLink,
+} from "../shared/tree-layout.js";
+
 declare global {
   interface Window {
     d3: any;
   }
 }
 
+interface EvidenceItem {
+  source: string;
+  title: string;
+}
+
 interface ScoreBreakdown {
   compositeScore: number;
   popularity: number;
+  semanticRelevance: number;
+  sourceAuthority: number;
 }
 
 interface KeywordNode {
@@ -16,6 +37,7 @@ interface KeywordNode {
   children: string[];
   score: ScoreBreakdown;
   roundId: number;
+  evidence: EvidenceItem[];
 }
 
 interface TraceEvent {
@@ -26,11 +48,14 @@ interface TraceEvent {
   status?: "ok" | "error";
   summary: string;
   timestamp: string;
+  payload?: Record<string, unknown>;
 }
 
 interface SessionState {
   sessionId: string;
+  rootNodeId: string;
   currentRootNodeId: string;
+  confirmedPath: string[];
   nodes: Record<string, KeywordNode>;
   rounds: Array<{
     roundId: number;
@@ -42,27 +67,24 @@ interface SessionState {
   status: string;
 }
 
-interface DisplayNode {
-  id: string;
-  keyword: string;
-  roundId: number;
-  kind: "round-root" | "leaf" | "node";
-  popularity?: number;
-  children: DisplayNode[];
-}
-
 const form = document.getElementById("start-form") as HTMLFormElement;
 const input = document.getElementById("keyword-input") as HTMLInputElement;
 const confirmBtn = document.getElementById("confirm-btn") as HTMLButtonElement;
 const roundsEl = document.getElementById("rounds") as HTMLDivElement;
 const traceEl = document.getElementById("trace") as HTMLDivElement;
 const statusEl = document.getElementById("status") as HTMLDivElement;
+const breadcrumbEl = document.getElementById("path-breadcrumb") as HTMLDivElement;
 
 const svg = window.d3.select("#tree");
 
 let currentSessionId = "";
 let selectedNodeId = "";
+let highlightedNodeId = "";
+let activeTraceEventId = "";
+let traceRoundFilter: number | null = null;
 let currentSessionStatus = "";
+let currentSessionState: SessionState | null = null;
+let traceEvents: TraceEvent[] = [];
 
 async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(url, init);
@@ -81,168 +103,344 @@ async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
   return (await resp.json()) as T;
 }
 
-function nodeTree(state: SessionState): DisplayNode {
-  const sortedRounds = state.rounds.slice().sort((a, b) => a.roundId - b.roundId);
+function resolveNodeIdForTrace(event: TraceEvent): string | undefined {
+  if (!currentSessionState) {
+    return undefined;
+  }
 
-  if (sortedRounds.length === 0) {
-    const root = state.nodes[state.currentRootNodeId];
+  const payload = event.payload ?? {};
+  const explicit = payload.nodeId ?? payload.rootNodeId ?? payload.confirmedNodeId;
+  if (typeof explicit === "string" && currentSessionState.nodes[explicit]) {
+    return explicit;
+  }
+
+  const round = currentSessionState.rounds.find((item) => item.roundId === event.roundId);
+
+  if (event.type === "round-checkpoint" && Array.isArray(payload.confirmedPath)) {
+    return (payload.confirmedPath as string[]).at(-1);
+  }
+
+  if (event.toolName === "searchEvidence" && typeof payload.keyword === "string") {
+    const match = Object.values(currentSessionState.nodes).find(
+      (node) => node.keyword === payload.keyword && node.roundId === event.roundId,
+    );
+    return match?.id;
+  }
+
+  if (event.toolName === "expandKeywords" || event.type === "llm-output") {
+    return round?.rootNodeId;
+  }
+
+  if (event.type === "round-checkpoint") {
+    return round?.rootNodeId;
+  }
+
+  return round?.rootNodeId;
+}
+
+function truncateText(text: string, maxLen: number): string {
+  if (text.length <= maxLen) {
+    return text;
+  }
+  return `${text.slice(0, maxLen - 1)}…`;
+}
+
+function spineDisplayLabel(keyword: string): string {
+  return truncateText(keyword, 26);
+}
+
+function leafDisplayLabel(keyword: string, heat: number): string {
+  const parts = keyword.trim().split(/\s+/);
+  const tail = parts.length > 2 ? parts.slice(-2).join(" ") : keyword;
+  return `${truncateText(tail, 20)} · ${heat}`;
+}
+
+function nodeLabel(node: PlacedNode): string {
+  if (node.kind === "leaf") {
+    const heat = Math.round((node.popularity ?? 0) * 100);
+    return leafDisplayLabel(node.keyword, heat);
+  }
+  return spineDisplayLabel(node.keyword);
+}
+
+function labelPlacement(node: PlacedNode, leafNodes: PlacedNode[]): {
+  dx: number;
+  dy: number;
+  anchor: "start" | "middle" | "end";
+  baseline: "auto" | "hanging" | "middle";
+  className: string;
+} {
+  if (node.kind === "leaf") {
+    const leafIndex = leafNodes.findIndex((item) => item.id === node.id);
+    const below = leafIndex % 2 === 0;
     return {
-      id: root.id,
-      keyword: root.keyword,
-      roundId: 0,
-      kind: "node",
-      children: [],
+      dx: 0,
+      dy: below ? 18 : -16,
+      anchor: "middle",
+      baseline: below ? "hanging" : "auto",
+      className: "node-label leaf-label",
     };
   }
 
-  const firstRound = sortedRounds[0];
-  const firstRoot = state.nodes[firstRound.rootNodeId];
-  const chainRoot: DisplayNode = {
-    id: firstRoot.id,
-    keyword: `R${firstRound.roundId} Root: ${firstRoot.keyword}`,
-    roundId: firstRound.roundId,
-    kind: "round-root",
-    children: [],
+  return {
+    dx: 0,
+    dy: -16,
+    anchor: "middle",
+    baseline: "auto",
+    className: "node-label spine-label",
   };
+}
 
-  let cursor = chainRoot;
+function nodeRadius(node: PlacedNode, chainHeadId: string): number {
+  if (node.kind === "leaf") {
+    return 7;
+  }
+  return node.id === chainHeadId ? 10 : 8;
+}
 
-  for (let index = 1; index < sortedRounds.length; index += 1) {
-    const round = sortedRounds[index];
-    const rootNode = state.nodes[round.rootNodeId];
-    const nextRoot: DisplayNode = {
-      id: rootNode.id,
-      keyword: `R${round.roundId} Root: ${rootNode.keyword}`,
-      roundId: round.roundId,
-      kind: "round-root",
-      children: [],
-    };
-    cursor.children = [nextRoot];
-    cursor = nextRoot;
+async function handleNodeClick(event: MouseEvent, node: PlacedNode, state: SessionState): Promise<void> {
+  if (!currentSessionId) {
+    return;
   }
 
-  const lastRound = sortedRounds[sortedRounds.length - 1];
-  cursor.children = lastRound.topNodeIds
-    .map((nodeId) => state.nodes[nodeId])
-    .filter((node): node is KeywordNode => Boolean(node))
-    .sort((a, b) => (b.score?.popularity ?? 0) - (a.score?.popularity ?? 0))
-    .map((node) => ({
-      id: node.id,
-      keyword: node.keyword,
-      roundId: node.roundId,
-      kind: "leaf" as const,
-      popularity: node.score?.popularity ?? 0,
-      children: [],
-    }));
+  if (event.ctrlKey) {
+    traceRoundFilter = node.roundId;
+    highlightedNodeId = node.id;
+    activeTraceEventId = "";
+    renderTree(state);
+    renderTracePanel();
+    statusEl.textContent = `Trace filtered to round ${node.roundId}`;
+    return;
+  }
 
-  return chainRoot;
+  if (event.shiftKey) {
+    selectedNodeId = node.id;
+    highlightedNodeId = node.id;
+    statusEl.textContent = `Selected: ${node.keyword} — click Confirm Path to freeze`;
+    renderTree(state);
+    return;
+  }
+
+  if (currentSessionStatus === "confirmed") {
+    statusEl.textContent = "Session confirmed — start a new exploration to continue";
+    return;
+  }
+
+  const shouldBacktrace =
+    isCurrentRootBacktraceTarget(state, node.id) && node.kind !== "leaf";
+
+  try {
+    if (shouldBacktrace) {
+      const targetId = parentBacktraceNodeId(state);
+      if (!targetId) {
+        return;
+      }
+      statusEl.textContent = "Backtracing to earlier layer...";
+      traceRoundFilter = null;
+      await apiJson("/api/backtrace", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessionId: currentSessionId, nodeId: targetId }),
+      });
+      selectedNodeId = targetId;
+      highlightedNodeId = targetId;
+      activeTraceEventId = "";
+      await refreshSession();
+      statusEl.textContent = `Backtraced — pick a leaf to explore again`;
+      return;
+    }
+
+    statusEl.textContent = "Expanding branch...";
+    traceRoundFilter = null;
+    await apiJson("/api/expand", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: currentSessionId, rootNodeId: node.id }),
+    });
+    selectedNodeId = node.id;
+    highlightedNodeId = node.id;
+    activeTraceEventId = "";
+    await refreshSession();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    statusEl.textContent = shouldBacktrace ? `Backtrace failed: ${message}` : `Expand failed: ${message}`;
+  }
+}
+
+function renderBreadcrumb(state: SessionState): void {
+  const crumbs = buildPathBreadcrumb(state);
+  breadcrumbEl.innerHTML = "";
+
+  if (crumbs.length <= 1) {
+    breadcrumbEl.hidden = true;
+    return;
+  }
+
+  breadcrumbEl.hidden = false;
+  crumbs.forEach((crumb, index) => {
+    if (index > 0) {
+      const sep = document.createElement("span");
+      sep.className = "path-sep";
+      sep.textContent = "→";
+      breadcrumbEl.appendChild(sep);
+    }
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = truncateText(crumb.keyword, 24);
+    btn.title = crumb.keyword;
+    if (crumb.isCurrent) {
+      btn.className = "current";
+      btn.disabled = true;
+    } else {
+      btn.addEventListener("click", () => {
+        void backtraceToNode(crumb.id);
+      });
+    }
+    breadcrumbEl.appendChild(btn);
+  });
+}
+
+async function backtraceToNode(nodeId: string): Promise<void> {
+  if (!currentSessionId || currentSessionStatus === "confirmed") {
+    return;
+  }
+
+  try {
+    statusEl.textContent = "Backtracing...";
+    traceRoundFilter = null;
+    await apiJson("/api/backtrace", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: currentSessionId, nodeId }),
+    });
+    selectedNodeId = nodeId;
+    highlightedNodeId = nodeId;
+    activeTraceEventId = "";
+    await refreshSession();
+    statusEl.textContent = "Backtraced — pick a leaf to explore again";
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    statusEl.textContent = `Backtrace failed: ${message}`;
+  }
 }
 
 function renderTree(state: SessionState): void {
   svg.selectAll("*").remove();
-  const d3 = window.d3;
+  const confirmed = new Set(state.confirmedPath ?? []);
+  renderBreadcrumb(state);
+  const data = buildFrontierDisplayTree(state);
+  const { nodes, links } = buildTreeLayout(data);
+  const { viewBox, pixelHeight } = computeViewBox(nodes);
+  const chainHeadId = data.id;
+  const leafNodes = nodes.filter((node) => node.kind === "leaf");
 
-  const data = nodeTree(state);
-  const root = d3.hierarchy(data);
-  const treeLayout = d3.tree().size([940, 500]);
-  treeLayout(root);
+  const svgNode = document.getElementById("tree");
+  if (svgNode) {
+    svgNode.setAttribute("viewBox", viewBox);
+    svgNode.style.height = `${pixelHeight}px`;
+  }
 
-  root.descendants().forEach((d: any) => {
-    d.y = d.depth * 230;
-  });
-
-  const g = svg.append("g").attr("transform", "translate(20,20)");
+  const g = svg.append("g");
 
   g.append("text")
-    .attr("x", 0)
-    .attr("y", 10)
+    .attr("x", nodes[0]?.x ?? 0)
+    .attr("y", (nodes[0]?.y ?? 0) - 32)
     .attr("class", "direction-hint")
-    .text("探索深度: 左 -> 右");
+    .text("Current root + leaves · click leaf to expand · click root to step back · breadcrumb to jump · Shift select · Ctrl filter");
 
   g.selectAll("path.link")
-    .data(root.links())
+    .data(links)
     .enter()
     .append("path")
-    .attr("class", "link")
-    .attr("d", d3.linkHorizontal().x((d: any) => d.y).y((d: any) => d.x));
+    .attr("class", "link tree-link")
+    .attr("d", (link: TreeLink) => treeLinkPath(link));
 
   const node = g
     .selectAll("g.node")
-    .data(root.descendants())
+    .data(nodes)
     .enter()
     .append("g")
     .attr("class", "node")
-    .attr("transform", (d: any) => `translate(${d.y},${d.x})`)
-    .on("click", async (event: MouseEvent, d: any) => {
-      if (!currentSessionId || !d?.data?.id) {
-        return;
-      }
-
-      if (event.shiftKey) {
-        selectedNodeId = d.data.id;
-        statusEl.textContent = `Selected: ${d.data.keyword} — click Confirm to freeze path`;
-        const state = await apiJson<SessionState>(`/api/session/${currentSessionId}`);
-        renderTree(state);
-        return;
-      }
-
-      if (currentSessionStatus === "confirmed") {
-        statusEl.textContent = "Session confirmed — start a new exploration to continue";
-        return;
-      }
-
-      try {
-        statusEl.textContent = "Expanding branch...";
-        await apiJson("/api/expand", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ sessionId: currentSessionId, rootNodeId: d.data.id }),
-        });
-        selectedNodeId = d.data.id;
-        await refreshSession();
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "Unknown error";
-        statusEl.textContent = `Expand failed: ${message}`;
-      }
+    .attr("data-node-id", (d: PlacedNode) => d.id)
+    .attr("transform", (d: PlacedNode) => `translate(${d.x},${d.y})`)
+    .on("click", (event: MouseEvent, d: PlacedNode) => {
+      void handleNodeClick(event, d, state);
     });
 
   node
     .append("circle")
-    .attr("r", (d: any) => (d.depth === 0 ? 10 : 7))
-    .attr("class", (d: any) => {
+    .attr("r", (d: PlacedNode) => nodeRadius(d, chainHeadId))
+    .attr("class", (d: PlacedNode) => {
       const classes = [];
-      if (d.data.id === selectedNodeId) {
+      if (d.id === selectedNodeId) {
         classes.push("selected-node");
       }
-      if (d.data.kind === "round-root") {
-        classes.push("star-node", "root-node");
-      } else if (d.data.kind === "leaf") {
+      if (d.id === highlightedNodeId) {
+        classes.push("highlighted-node");
+      }
+      if (confirmed.has(d.id)) {
+        classes.push("confirmed-node");
+      }
+      if (d.kind === "leaf") {
         classes.push("star-node", "leaf-node");
+      } else if (d.id === chainHeadId) {
+        classes.push("star-node", "root-node");
       } else {
         classes.push("star-node");
       }
       return classes.join(" ");
     });
 
-  node
-    .append("text")
-    .attr("dx", 12)
-    .attr("dy", 4)
-    .text((d: any) => {
-      if (d.data.kind === "leaf") {
-        const heat = Math.round((d.data.popularity ?? 0) * 100);
-        return `${d.data.keyword}  热度:${heat}`;
-      }
-      return `${d.data.keyword}`;
-    })
-    .attr("class", "node-label");
+  node.each(function (this: SVGGElement, d: PlacedNode) {
+    const placement = labelPlacement(d, leafNodes);
+    const label = window.d3
+      .select(this)
+      .append("text")
+      .attr("class", placement.className)
+      .attr("text-anchor", placement.anchor)
+      .attr("dominant-baseline", placement.baseline)
+      .attr("dx", placement.dx)
+      .attr("dy", placement.dy)
+      .text(nodeLabel(d));
+    label.append("title").text(d.keyword);
+  });
+}
+
+function formatScore(score: ScoreBreakdown): string {
+  return `rel ${Math.round(score.semanticRelevance * 100)} · pop ${Math.round(score.popularity * 100)} · auth ${Math.round(score.sourceAuthority * 100)} · composite ${Math.round(score.compositeScore * 100)}`;
 }
 
 function renderRounds(state: SessionState): void {
   roundsEl.innerHTML = "";
+
+  if (state.confirmedPath.length > 0) {
+    const pathCard = document.createElement("div");
+    pathCard.className = "panel-card";
+    const labels = state.confirmedPath
+      .map((id) => state.nodes[id]?.keyword ?? id.slice(0, 8))
+      .join(" → ");
+    pathCard.innerHTML = `
+      <div class="panel-title">Confirmed Path</div>
+      <div>${labels}</div>
+    `;
+    roundsEl.appendChild(pathCard);
+  }
+
   for (const round of state.rounds.slice().reverse()) {
     const card = document.createElement("div");
     card.className = "panel-card";
+
+    const evidenceLines = round.topNodeIds
+      .map((nodeId) => state.nodes[nodeId])
+      .filter((node): node is KeywordNode => Boolean(node))
+      .sort((a, b) => b.score.compositeScore - a.score.compositeScore)
+      .map((node) => {
+        const source = node.evidence[0]?.source ?? "n/a";
+        return `<div class="evidence-row"><strong>${node.keyword}</strong> — ${formatScore(node.score)} · ${source}</div>`;
+      })
+      .join("");
+
     card.innerHTML = `
       <div class="panel-title">Round ${round.roundId}</div>
       <div><strong>Direction:</strong> ${round.directionSummary.label}</div>
@@ -251,32 +449,74 @@ function renderRounds(state: SessionState): void {
       round.personaHypothesis.confidence * 100,
     )}%)</div>
       <div>${round.personaHypothesis.reason}</div>
+      <div class="panel-title" style="margin-top:8px">Evidence (Top 5)</div>
+      ${evidenceLines}
     `;
     roundsEl.appendChild(card);
   }
 }
 
-async function renderTrace(): Promise<void> {
-  if (!currentSessionId) {
-    return;
-  }
-  const events = await apiJson<TraceEvent[]>(`/api/trace/${currentSessionId}`);
+function renderTracePanel(): void {
   traceEl.innerHTML = "";
 
-  for (const event of events.slice().reverse().slice(0, 40)) {
+  const filtered = traceEvents
+    .filter((event) => traceRoundFilter === null || event.roundId === traceRoundFilter)
+    .slice()
+    .reverse()
+    .slice(0, 40);
+
+  if (traceRoundFilter !== null) {
+    const hint = document.createElement("div");
+    hint.className = "trace-filter-hint";
+    hint.textContent = `Showing round ${traceRoundFilter} only · Ctrl+click another node or clear below`;
+    const clearBtn = document.createElement("button");
+    clearBtn.type = "button";
+    clearBtn.textContent = "Clear filter";
+    clearBtn.addEventListener("click", () => {
+      traceRoundFilter = null;
+      renderTracePanel();
+    });
+    hint.appendChild(clearBtn);
+    traceEl.appendChild(hint);
+  }
+
+  for (const event of filtered) {
     const item = document.createElement("div");
     item.className = "trace-item";
+    if (event.id === activeTraceEventId) {
+      item.classList.add("trace-item-active");
+    }
     item.innerHTML = `
       <div class="trace-head">R${event.roundId} · ${event.type}${event.toolName ? ` · ${event.toolName}` : ""}</div>
       <div>${event.summary}</div>
       <div class="trace-time">${new Date(event.timestamp).toLocaleTimeString()}</div>
     `;
+    item.addEventListener("click", () => {
+      activeTraceEventId = event.id;
+      const nodeId = resolveNodeIdForTrace(event);
+      if (nodeId) {
+        highlightedNodeId = nodeId;
+        if (currentSessionState) {
+          renderTree(currentSessionState);
+        }
+      }
+      renderTracePanel();
+    });
     traceEl.appendChild(item);
   }
 }
 
+async function loadTrace(): Promise<void> {
+  if (!currentSessionId) {
+    return;
+  }
+  traceEvents = await apiJson<TraceEvent[]>(`/api/trace/${currentSessionId}`);
+  renderTracePanel();
+}
+
 async function refreshSession(): Promise<void> {
   const state = await apiJson<SessionState>(`/api/session/${currentSessionId}`);
+  currentSessionState = state;
   currentSessionStatus = state.status;
   confirmBtn.disabled = state.status === "confirmed" || !selectedNodeId;
   statusEl.textContent =
@@ -285,12 +525,12 @@ async function refreshSession(): Promise<void> {
       : `Session ${state.sessionId.slice(0, 8)} · ${state.status}`;
   renderTree(state);
   renderRounds(state);
-  await renderTrace();
+  await loadTrace();
 }
 
 confirmBtn.addEventListener("click", async () => {
   if (!currentSessionId || !selectedNodeId) {
-    statusEl.textContent = "Shift+click a node to select it, then Confirm";
+    statusEl.textContent = "Shift+click a node to select it, then Confirm Path";
     return;
   }
 
@@ -317,6 +557,9 @@ form.addEventListener("submit", async (event) => {
 
   try {
     statusEl.textContent = "Starting exploration...";
+    traceRoundFilter = null;
+    activeTraceEventId = "";
+    highlightedNodeId = "";
     const state = await apiJson<SessionState>("/api/start", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -325,6 +568,7 @@ form.addEventListener("submit", async (event) => {
 
     currentSessionId = state.sessionId;
     selectedNodeId = state.currentRootNodeId;
+    highlightedNodeId = state.currentRootNodeId;
     await refreshSession();
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";

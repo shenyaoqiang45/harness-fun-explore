@@ -1,0 +1,22 @@
+---
+description: 修改代码后自动运行测试，失败则修复直至通过
+alwaysApply: true
+---
+
+# 修改代码后自动测试
+
+在 Cursor 中每次 AI 修改代码后，自动运行测试；测试失败则继续调查、修复并重跑，直到通过。
+
+After modifying code:
+
+- Run the project's test suite
+- Do not stop at test failures
+- Investigate the root cause
+- Apply fixes
+- Re-run tests
+- Continue until tests pass
+
+## 本项目
+
+- 测试命令：`npm test`（Vitest）
+- 改代码后运行完整测试套件，失败则修复直至通过

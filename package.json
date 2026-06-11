@@ -1,0 +1,24 @@
+{
+  "name": "harness-fun-explore",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "dist/server/index.js",
+  "scripts": {
+    "build": "tsc --project tsconfig.json",
+    "dev": "tsx src/server/index.ts",
+    "test": "vitest run"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "fastify": "^5.8.5"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.2",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}

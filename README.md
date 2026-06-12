@@ -4,11 +4,15 @@
 
 A human-in-the-loop exploration system—not a traditional search box. Enter a seed keyword and co-discover direction through recursive clarification: expand, rank, visualize, click, repeat.
 
-## Screenshot
+## Screenshots
 
 ![Keyword exploration demo](docs/screenshots/exploration-demo.png)
 
 *Seed “3D vision” → four rounds of recursive clarification: star-map tree, path breadcrumb, direction & persona panel, and Top 5 evidence scores.*
+
+![Progress bar and trace with candidate keywords](docs/screenshots/exploration-progress-trace.png)
+
+*Expanding from “光开关”: LLM + evidence DB pickers, three-step round progress, and trace rows labeled with each candidate keyword searched.*
 
 ## Product beliefs
 

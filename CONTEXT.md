@@ -13,7 +13,7 @@
 | **Persona hypothesis** | LLM output inferring the user's exploratory intent. |
 | **Trace event** | A recorded LLM output or tool-call step for transparency. |
 | **Confirmed path** | Frozen chain of node IDs from root to the user's final choice. |
-| **Heat (热度)** | Leaf popularity score scaled0–100 for display. |
+| **Heat (热度)** | Leaf bibliometric score scaled 0–100 for display; from OpenAlex (发文量、被引、趋势、共现词, ADR-007). Fails loudly if unavailable. |
 
 ## Session statuses
 
@@ -26,4 +26,5 @@
 | **ExplorationEngine** | Session state, round orchestration, confirm. |
 | **TraceStore** | Append-only trace timeline per session. |
 | **EngineDeps** | Injectable LLM + evidence providers. |
+| **OpenAlexEvidenceProvider** | `searchEvidence` impl fetching bibliometric heat from OpenAlex REST API. |
 | **scoreKeyword** | Composite ranking from relevance, popularity, authority. |

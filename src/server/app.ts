@@ -2,23 +2,30 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import Fastify from "fastify";
 import type { BacktraceRequest, ConfirmRequest, ExpandRequest, StartSessionRequest } from "../shared/types.js";
-import { ExplorationEngine } from "./engine.js";
+import { ExplorationEngine, type EngineDeps } from "./engine.js";
+import { createOpenAlexEvidenceProvider } from "./evidence.js";
 import { createEngineDeps } from "./providers.js";
 import { TraceStore } from "./trace-store.js";
 
-const traceStore = new TraceStore();
-const engine = new ExplorationEngine(
-  createEngineDeps({
-    provider: (process.env.LLM_PROVIDER as "auto" | "minimax" | "kimi" | undefined) ?? "auto",
+function createProductionDeps(): EngineDeps {
+  return createEngineDeps({
+    provider:
+      (process.env.LLM_PROVIDER as "auto" | "minimax" | "kimi" | "deepseek" | undefined) ??
+      "auto",
     minimaxApiKey: process.env.MINIMAX_API_KEY,
     minimaxBaseUrl: process.env.MINIMAX_BASE_URL,
     minimaxModel: process.env.MINIMAX_MODEL,
     apiKey: process.env.KIMI_API_KEY,
     baseUrl: process.env.KIMI_BASE_URL,
     model: process.env.KIMI_MODEL,
-  }),
-  traceStore,
-);
+    deepseekApiKey: process.env.DEEPSEEK_API_KEY,
+    deepseekChatUrl: process.env.DEEPSEEK_CHAT_COMPLETIONS_URL,
+    deepseekModel: process.env.DEEPSEEK_MODEL,
+    searchEvidence: createOpenAlexEvidenceProvider({
+      mailto: process.env.OPENALEX_MAILTO,
+    }),
+  });
+}
 
 function htmlShell(): string {
   return `<!doctype html>
@@ -214,7 +221,9 @@ async function readDistModule(segments: string[]): Promise<string> {
   return readFile(filePath, "utf8");
 }
 
-export function buildApp() {
+export function buildApp(options?: { deps?: EngineDeps }) {
+  const traceStore = new TraceStore();
+  const engine = new ExplorationEngine(options?.deps ?? createProductionDeps(), traceStore);
   const app = Fastify({ logger: false });
 
   app.get("/", async (_req, reply) => {

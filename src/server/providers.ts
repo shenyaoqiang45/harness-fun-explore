@@ -1,15 +1,21 @@
 import type { DirectionSummary, PersonaHypothesis, RoundResult } from "../shared/types.js";
-import { defaultEngineDeps, type EngineDeps } from "./engine.js";
+import type { EngineDeps } from "./engine.js";
 
-interface KimiOptions {
-  provider?: "auto" | "minimax" | "kimi";
+type LlmProvider = "auto" | "minimax" | "kimi" | "deepseek";
+
+interface LlmOptions {
+  provider?: LlmProvider;
   minimaxApiKey?: string;
   minimaxBaseUrl?: string;
   minimaxModel?: string;
   apiKey?: string;
   baseUrl?: string;
   model?: string;
+  deepseekApiKey?: string;
+  deepseekChatUrl?: string;
+  deepseekModel?: string;
   userAgent?: string;
+  searchEvidence: EngineDeps["searchEvidence"];
 }
 
 function extractJsonObject(text: string): Record<string, unknown> {
@@ -25,9 +31,9 @@ function extractJsonObject(text: string): Record<string, unknown> {
   }
 }
 
-async function callKimiJson(args: {
+async function callChatJson(args: {
   apiKey: string;
-  baseUrl: string;
+  chatCompletionsUrl: string;
   model: string;
   systemPrompt: string;
   userPrompt: string;
@@ -43,7 +49,7 @@ async function callKimiJson(args: {
     headers["user-agent"] = args.userAgent;
   }
 
-  const response = await fetch(`${args.baseUrl}/chat/completions`, {
+  const response = await fetch(args.chatCompletionsUrl, {
     method: "POST",
     headers,
     body: JSON.stringify({
@@ -59,7 +65,7 @@ async function callKimiJson(args: {
 
   if (!response.ok) {
     const body = await response.text();
-    throw new Error(`Kimi API failed with ${response.status}: ${body.slice(0, 200)}`);
+    throw new Error(`LLM API failed with ${response.status}: ${body.slice(0, 200)}`);
   }
 
   const data = (await response.json()) as {
@@ -68,48 +74,93 @@ async function callKimiJson(args: {
 
   const content = data.choices?.[0]?.message?.content;
   if (!content) {
-    throw new Error("Kimi API returned empty content");
+    throw new Error("LLM API returned empty content");
   }
 
   return extractJsonObject(content);
 }
 
-export function createEngineDeps(options: KimiOptions): EngineDeps {
+function resolveLlmConfig(options: LlmOptions): {
+  apiKey: string;
+  chatCompletionsUrl: string;
+  model: string;
+  userAgent?: string;
+  fixedTemperature?: number;
+} {
   const provider = options.provider ?? "auto";
+  const useDeepSeek = provider === "deepseek";
   const useMiniMax =
     provider === "minimax" ||
-    (provider === "auto" && Boolean(options.minimaxApiKey));
+    (provider === "auto" && Boolean(options.minimaxApiKey) && !useDeepSeek);
+
+  if (useDeepSeek) {
+    const apiKey = options.deepseekApiKey;
+    if (!apiKey) {
+      throw new Error("LLM API key required. Set DEEPSEEK_API_KEY when LLM_PROVIDER=deepseek.");
+    }
+    return {
+      apiKey,
+      chatCompletionsUrl:
+        options.deepseekChatUrl ?? "https://api.deepseek.com/chat/completions",
+      model: options.deepseekModel ?? "deepseek-chat",
+    };
+  }
 
   const apiKey = useMiniMax ? options.minimaxApiKey : options.apiKey;
-  const isKimiCodeKey = Boolean(apiKey?.startsWith("sk-kimi-"));
+  if (!apiKey) {
+    throw new Error(
+      "LLM API key required. Set KIMI_API_KEY, DEEPSEEK_API_KEY, or MINIMAX_API_KEY — mock LLM is not supported.",
+    );
+  }
+
+  const isKimiCodeKey = Boolean(apiKey.startsWith("sk-kimi-"));
+  const moonshotDefaultUrl = "https://api.moonshot.cn/v1";
+  const moonshotDefaultModel = "moonshot-v1-8k";
+  const usesMoonshotDefaults =
+    (!options.baseUrl || options.baseUrl === moonshotDefaultUrl) &&
+    (!options.model || options.model === moonshotDefaultModel);
   const baseUrl = useMiniMax
     ? options.minimaxBaseUrl ?? "https://api.minimax.chat/v1"
-    : options.baseUrl ??
-      (isKimiCodeKey ? "https://api.kimi.com/coding/v1" : "https://api.moonshot.cn/v1");
+    : isKimiCodeKey && usesMoonshotDefaults
+      ? "https://api.kimi.com/coding/v1"
+      : (options.baseUrl ??
+        (isKimiCodeKey ? "https://api.kimi.com/coding/v1" : moonshotDefaultUrl));
   const model = useMiniMax
     ? options.minimaxModel ?? "MiniMax-M3"
-    : options.model ?? (isKimiCodeKey ? "kimi-for-coding" : "moonshot-v1-8k");
+    : isKimiCodeKey && usesMoonshotDefaults
+      ? "kimi-for-coding"
+      : (options.model ?? (isKimiCodeKey ? "kimi-for-coding" : moonshotDefaultModel));
   const userAgent = useMiniMax
     ? options.userAgent
     : options.userAgent ?? (isKimiCodeKey ? "claude-cli/1.0 (external)" : undefined);
 
-  if (!apiKey) {
-    return defaultEngineDeps;
-  }
+  return {
+    apiKey,
+    chatCompletionsUrl: `${baseUrl}/chat/completions`,
+    model,
+    userAgent,
+    fixedTemperature: isKimiCodeKey ? 1 : undefined,
+  };
+}
+
+export function createEngineDeps(options: LlmOptions): EngineDeps {
+  const { apiKey, chatCompletionsUrl, model, userAgent, fixedTemperature } =
+    resolveLlmConfig(options);
+  const searchEvidence = options.searchEvidence;
 
   return {
-    searchEvidence: defaultEngineDeps.searchEvidence,
+    searchEvidence,
 
     async expandKeywords(seed: string): Promise<string[]> {
-      const payload = await callKimiJson({
+      const payload = await callChatJson({
         apiKey,
-        baseUrl,
+        chatCompletionsUrl,
         model,
         userAgent,
         systemPrompt:
           "You generate keyword candidates for recursive topic exploration. Return strict JSON with an array field named keywords.",
         userPrompt: `Seed keyword: ${seed}\nReturn exactly 10 concise related keywords in Chinese.`,
-        temperature: 0.5,
+        temperature: fixedTemperature ?? 0.5,
       });
 
       const keywords = Array.isArray(payload.keywords) ? payload.keywords : [];
@@ -119,56 +170,50 @@ export function createEngineDeps(options: KimiOptions): EngineDeps {
         .slice(0, 10);
 
       if (normalized.length < 10) {
-        const backup = await defaultEngineDeps.expandKeywords(seed);
-        return [...normalized, ...backup].slice(0, 10);
+        throw new Error(
+          `LLM returned only ${normalized.length} keywords for "${seed}"; expected 10.`,
+        );
       }
 
       return normalized;
     },
 
-    async summarizeDirection(rootKeyword: string, topKeywords: string[]): Promise<DirectionSummary> {
-      const payload = await callKimiJson({
-        apiKey,
-        baseUrl,
-        model,
-        userAgent,
-        systemPrompt:
-          "You summarize exploration direction. Return strict JSON with fields label and reason in Chinese.",
-        userPrompt: `Root keyword: ${rootKeyword}\nTop branches: ${topKeywords.join(", ")}\nSummarize direction in 1 short label and 1 short reason.`,
-        temperature: 0.3,
-      });
-
-      const label = String(payload.label ?? "方向探索中").slice(0, 40);
-      const reason = String(payload.reason ?? "模型正在根据候选词持续收敛方向").slice(0, 160);
-      return { label, reason };
-    },
-
-    async inferPersona(rounds: RoundResult[]): Promise<PersonaHypothesis> {
-      const recent = rounds.slice(-3).map((round) => ({
+    async summarizeRound(
+      rootKeyword: string,
+      topKeywords: string[],
+      priorRounds: RoundResult[],
+    ): Promise<{ directionSummary: DirectionSummary; personaHypothesis: PersonaHypothesis }> {
+      const recent = priorRounds.slice(-3).map((round) => ({
         roundId: round.roundId,
         direction: round.directionSummary.label,
       }));
 
-      const payload = await callKimiJson({
+      const payload = await callChatJson({
         apiKey,
-        baseUrl,
+        chatCompletionsUrl,
         model,
         userAgent,
         systemPrompt:
-          "You infer a temporary user persona from exploration behavior. Return strict JSON with label, confidence, reason in Chinese.",
-        userPrompt: `Recent rounds: ${JSON.stringify(recent)}\nReturn a conservative persona hypothesis.`,
-        temperature: 0.2,
+          "You summarize exploration direction and infer a temporary user persona. Return strict JSON with fields directionLabel, directionReason, personaLabel, personaConfidence (0-1 number), personaReason in Chinese except personaConfidence.",
+        userPrompt: `Root keyword: ${rootKeyword}\nTop branches: ${topKeywords.join(", ")}\nPrior rounds: ${JSON.stringify(recent)}\nReturn a short direction summary and a conservative persona hypothesis.`,
+        temperature: fixedTemperature ?? 0.3,
       });
 
-      const rawConfidence = Number(payload.confidence ?? 0.65);
+      const rawConfidence = Number(payload.personaConfidence ?? 0.65);
       const confidence = Number.isFinite(rawConfidence)
         ? Math.max(0, Math.min(1, rawConfidence))
         : 0.65;
 
       return {
-        label: String(payload.label ?? "探索型用户").slice(0, 40),
-        confidence,
-        reason: String(payload.reason ?? "用户持续点击分支并收敛方向").slice(0, 160),
+        directionSummary: {
+          label: String(payload.directionLabel ?? "方向探索中").slice(0, 40),
+          reason: String(payload.directionReason ?? "模型正在根据候选词持续收敛方向").slice(0, 160),
+        },
+        personaHypothesis: {
+          label: String(payload.personaLabel ?? "探索型用户").slice(0, 40),
+          confidence,
+          reason: String(payload.personaReason ?? "用户持续点击分支并收敛方向").slice(0, 160),
+        },
       };
     },
   };

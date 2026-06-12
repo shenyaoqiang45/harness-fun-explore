@@ -1,8 +1,41 @@
 import { afterAll, describe, expect, it } from "vitest";
+import type { EngineDeps } from "../src/server/engine.js";
 import { buildApp } from "../src/server/app.js";
 
+function makeTestDeps(): EngineDeps {
+  return {
+    async expandKeywords(seed: string) {
+      return Array.from({ length: 10 }, (_, index) => `${seed}-${index + 1}`);
+    },
+    async searchEvidence(keyword: string) {
+      return [
+        {
+          source: "test-web",
+          title: keyword,
+          url: `https://example.com/${encodeURIComponent(keyword)}`,
+          popularity: 0.4 + ((keyword.length % 5) * 0.1),
+          sourceAuthority: 0.5,
+        },
+      ];
+    },
+    async summarizeRound(rootKeyword: string, topKeywords: string[], priorRounds: { roundId: number }[]) {
+      return {
+        directionSummary: {
+          label: `Focus ${rootKeyword}`,
+          reason: topKeywords.join(", "),
+        },
+        personaHypothesis: {
+          label: priorRounds.length > 0 ? "Focused" : "Exploring",
+          confidence: 0.7,
+          reason: "Testing",
+        },
+      };
+    },
+  };
+}
+
 describe("HTTP API", () => {
-  const app = buildApp();
+  const app = buildApp({ deps: makeTestDeps() });
 
   afterAll(async () => {
     await app.close();

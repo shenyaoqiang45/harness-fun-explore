@@ -90,7 +90,7 @@ npm run dev    # 自动 build 并启动 http://localhost:3000
 npm test
 ```
 
-复制 [.env.example](.env.example) 为 `.env` 并配置 LLM API Key；未配置时使用本地 mock。
+复制 [.env.example](.env.example) 为 `.env`，配置 `KIMI_API_KEY` 或 `MINIMAX_API_KEY`。未配置时服务启动即报错。叶节点热度来自 [OpenAlex](https://openalex.org) 学术计量 API（发文量、被引、趋势、共现词）。
 
 ## Kimi 接入
 
@@ -103,7 +103,7 @@ npm test
 1. 设置 `LLM_PROVIDER=minimax` 与 `MINIMAX_API_KEY`
 2. 可选 `MINIMAX_BASE_URL`、`MINIMAX_MODEL`
 
-优先级：MiniMax（若配置）→ Kimi → mock
+优先级：MiniMax（若配置）→ Kimi。缺 Key 则启动失败。
 
 ## 产品设计 ADR
 

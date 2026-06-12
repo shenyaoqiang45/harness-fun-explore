@@ -67,7 +67,7 @@ npm run dev    # builds client bundle, serves http://localhost:3000
 npm test
 ```
 
-Copy [.env.example](.env.example) to `.env` for Kimi or MiniMax. Without keys, the server uses local mock providers.
+Copy [.env.example](.env.example) to `.env` and set `KIMI_API_KEY` or `MINIMAX_API_KEY`. The server refuses to start without an LLM key. Leaf heat comes from the [OpenAlex](https://openalex.org) bibliometric API (publication volume, citations, trends, co-occurring terms).
 
 ### LLM providers
 
@@ -75,7 +75,7 @@ Copy [.env.example](.env.example) to `.env` for Kimi or MiniMax. Without keys, t
 
 **MiniMax:** `LLM_PROVIDER=minimax`, `MINIMAX_API_KEY` (+ optional base URL / model).
 
-Priority: MiniMax (if configured) → Kimi → mock.
+Priority: MiniMax (if configured) → Kimi. Missing key → startup error.
 
 ## Architecture ADRs
 

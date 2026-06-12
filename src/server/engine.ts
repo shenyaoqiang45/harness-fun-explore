@@ -14,8 +14,11 @@ import { TraceStore } from "./trace-store.js";
 export interface EngineDeps {
   expandKeywords: (seed: string) => Promise<string[]>;
   searchEvidence: (keyword: string) => Promise<EvidenceItem[]>;
-  summarizeDirection: (rootKeyword: string, topKeywords: string[]) => Promise<DirectionSummary>;
-  inferPersona: (rounds: RoundResult[]) => Promise<PersonaHypothesis>;
+  summarizeRound: (
+    rootKeyword: string,
+    topKeywords: string[],
+    priorRounds: RoundResult[],
+  ) => Promise<{ directionSummary: DirectionSummary; personaHypothesis: PersonaHypothesis }>;
 }
 
 function topAuthority(evidence: EvidenceItem[]): number {
@@ -124,50 +127,50 @@ export class ExplorationEngine {
       payload: { candidates, rootNodeId },
     });
 
-    const scored = [] as Array<{ keyword: string; node: KeywordNode }>;
+    const scored = await Promise.all(
+      candidates.map(async (keyword) => {
+        const t2 = Date.now();
+        this.traces.append({
+          sessionId,
+          roundId,
+          type: "tool-call-start",
+          toolName: "searchEvidence",
+          summary: "Searching evidence",
+          payload: { keyword },
+        });
 
-    for (const keyword of candidates) {
-      const t2 = Date.now();
-      this.traces.append({
-        sessionId,
-        roundId,
-        type: "tool-call-start",
-        toolName: "searchEvidence",
-        summary: "Searching evidence",
-        payload: { keyword },
-      });
+        const evidence = await this.deps.searchEvidence(keyword);
 
-      const evidence = await this.deps.searchEvidence(keyword);
+        const score = scoreKeyword({
+          semanticRelevance: semanticRelevance(rootNode.keyword, keyword),
+          popularity: avgPopularity(evidence),
+          sourceAuthority: topAuthority(evidence),
+        });
 
-      const score = scoreKeyword({
-        semanticRelevance: semanticRelevance(rootNode.keyword, keyword),
-        popularity: avgPopularity(evidence),
-        sourceAuthority: topAuthority(evidence),
-      });
+        const node: KeywordNode = {
+          id: randomUUID(),
+          keyword,
+          roundId,
+          parentId: rootNodeId,
+          score,
+          evidence,
+          children: [],
+        };
 
-      const node: KeywordNode = {
-        id: randomUUID(),
-        keyword,
-        roundId,
-        parentId: rootNodeId,
-        score,
-        evidence,
-        children: [],
-      };
+        this.traces.append({
+          sessionId,
+          roundId,
+          type: "tool-call-end",
+          toolName: "searchEvidence",
+          status: "ok",
+          durationMs: Date.now() - t2,
+          summary: "Evidence collected",
+          payload: { keyword, evidenceCount: evidence.length, nodeId: node.id },
+        });
 
-      this.traces.append({
-        sessionId,
-        roundId,
-        type: "tool-call-end",
-        toolName: "searchEvidence",
-        status: "ok",
-        durationMs: Date.now() - t2,
-        summary: "Evidence collected",
-        payload: { keyword, evidenceCount: evidence.length, nodeId: node.id },
-      });
-
-      scored.push({ keyword, node });
-    }
+        return { keyword, node };
+      }),
+    );
 
     const top = scored
       .sort((a, b) => b.node.score.compositeScore - a.node.score.compositeScore)
@@ -179,22 +182,32 @@ export class ExplorationEngine {
     }
 
     const topKeywords = top.map((item) => item.keyword);
-    const directionSummary = await this.deps.summarizeDirection(rootNode.keyword, topKeywords);
-    const personaHypothesis = await this.deps.inferPersona([
-      ...session.rounds,
-      {
-        roundId,
-        rootNodeId,
-        candidateKeywords: candidates,
-        topNodeIds: top.map((item) => item.node.id),
-        directionSummary,
-        personaHypothesis: {
-          label: "",
-          confidence: 0,
-          reason: "",
-        },
-      },
-    ]);
+    const t3 = Date.now();
+    this.traces.append({
+      sessionId,
+      roundId,
+      type: "tool-call-start",
+      toolName: "summarizeRound",
+      summary: "Summarizing direction and persona",
+      payload: { rootKeyword: rootNode.keyword, topKeywords },
+    });
+
+    const { directionSummary, personaHypothesis } = await this.deps.summarizeRound(
+      rootNode.keyword,
+      topKeywords,
+      session.rounds,
+    );
+
+    this.traces.append({
+      sessionId,
+      roundId,
+      type: "tool-call-end",
+      toolName: "summarizeRound",
+      status: "ok",
+      durationMs: Date.now() - t3,
+      summary: "Direction summary and persona updated",
+      payload: { directionSummary, personaHypothesis },
+    });
 
     this.traces.append({
       sessionId,
@@ -345,51 +358,3 @@ export class ExplorationEngine {
       keptRounds[keptRounds.length - 1]?.rootNodeId ?? session.rootNodeId;
   }
 }
-
-export const defaultEngineDeps: EngineDeps = {
-  async expandKeywords(seed) {
-    return [
-      `${seed} trend`,
-      `${seed} strategy`,
-      `${seed} use case`,
-      `${seed} workflow`,
-      `${seed} platform`,
-      `${seed} benchmark`,
-      `${seed} framework`,
-      `${seed} roadmap`,
-      `${seed} architecture`,
-      `${seed} adoption`,
-    ];
-  },
-
-  async searchEvidence(keyword) {
-    const normalized = keyword.length % 10;
-    const popularity = Math.min(1, 0.3 + normalized / 10);
-    const authority = Math.min(1, 0.4 + (keyword.split(" ").length % 5) / 10);
-    return [
-      {
-        source: "public-web",
-        title: `${keyword} insight`,
-        url: `https://example.com/search?q=${encodeURIComponent(keyword)}`,
-        popularity,
-        sourceAuthority: authority,
-      },
-    ];
-  },
-
-  async summarizeDirection(rootKeyword, topKeywords) {
-    return {
-      label: `Exploring ${rootKeyword}`,
-      reason: `Top branches emphasize: ${topKeywords.slice(0, 3).join(", ")}`,
-    };
-  },
-
-  async inferPersona(rounds) {
-    const confidence = Math.min(0.95, 0.55 + rounds.length * 0.08);
-    return {
-      label: rounds.length > 1 ? "Decision-focused explorer" : "Early-stage explorer",
-      confidence,
-      reason: "User keeps refining branches to reduce ambiguity.",
-    };
-  },
-};

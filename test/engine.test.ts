@@ -77,21 +77,47 @@ describe("ExplorationEngine", () => {
     expect(switched.rounds[1].rootNodeId).toBe(siblingLeaf);
   });
 
-  it("passes current round context to persona inference on the first round", async () => {
-    let roundsSeen = -1;
+  it("searches evidence for all candidates in parallel", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const baseDeps = makeDeps();
+
     const engine = new ExplorationEngine(
       {
-        ...makeDeps(),
-        async inferPersona(rounds) {
-          roundsSeen = rounds.length;
-          return { label: "Explorer", confidence: 0.6, reason: "Testing" };
+        ...baseDeps,
+        async searchEvidence(keyword: string) {
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          inFlight -= 1;
+          return baseDeps.searchEvidence(keyword);
         },
       },
       new TraceStore(),
     );
 
     await engine.start("harness");
-    expect(roundsSeen).toBe(1);
+    expect(maxInFlight).toBeGreaterThan(1);
+  });
+
+  it("passes prior rounds to summarizeRound on the first round", async () => {
+    let priorRoundsSeen = -1;
+    const engine = new ExplorationEngine(
+      {
+        ...makeDeps(),
+        async summarizeRound(_rootKeyword, _topKeywords, priorRounds) {
+          priorRoundsSeen = priorRounds.length;
+          return {
+            directionSummary: { label: "Focus", reason: "Testing" },
+            personaHypothesis: { label: "Explorer", confidence: 0.6, reason: "Testing" },
+          };
+        },
+      },
+      new TraceStore(),
+    );
+
+    await engine.start("harness");
+    expect(priorRoundsSeen).toBe(0);
   });
 });
 
@@ -111,17 +137,17 @@ function makeDeps() {
         },
       ];
     },
-    async summarizeDirection(rootKeyword: string, topKeywords: string[]) {
+    async summarizeRound(rootKeyword: string, topKeywords: string[], priorRounds: { roundId: number }[]) {
       return {
-        label: `Focus ${rootKeyword}`,
-        reason: topKeywords.join(", "),
-      };
-    },
-    async inferPersona(rounds: { roundId: number }[]) {
-      return {
-        label: rounds.length > 0 ? "Focused" : "Exploring",
-        confidence: 0.7,
-        reason: "Testing",
+        directionSummary: {
+          label: `Focus ${rootKeyword}`,
+          reason: topKeywords.join(", "),
+        },
+        personaHypothesis: {
+          label: priorRounds.length > 0 ? "Focused" : "Exploring",
+          confidence: 0.7,
+          reason: "Testing",
+        },
       };
     },
   };

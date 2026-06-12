@@ -1,4 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import { parseArxivFeed, createArxivEvidenceProvider } from "../src/server/evidence-arxiv.js";
+import {
+  createSemanticScholarEvidenceProvider,
+  extractTitleTerms,
+} from "../src/server/evidence-semantic-scholar.js";
+import { resolveDefaultEvidenceProvider } from "../src/server/evidence-providers.js";
 import {
   computeTrendMetrics,
   createOpenAlexEvidenceProvider,
@@ -136,5 +142,97 @@ describe("createOpenAlexEvidenceProvider", () => {
     const evidence = await search("transformer");
     expect(evidence.some((item) => item.source === "openalex-corpus")).toBe(true);
     expect(evidence.some((item) => item.source === "openalex-trend")).toBe(false);
+  });
+});
+
+describe("createSemanticScholarEvidenceProvider", () => {
+  const s2Payload = {
+    total: 42_000,
+    data: [
+      { title: "Transformer Attention for Vision", citationCount: 1200, year: 2025, url: "https://example.com/1" },
+      { title: "Large Language Model Calibration", citationCount: 300, year: 2024, url: "https://example.com/2" },
+    ],
+  };
+
+  it("returns corpus, citation, trend, and co-occurrence evidence", async () => {
+    const search = createSemanticScholarEvidenceProvider({
+      fetchImpl: fakeFetch(() => jsonResponse(s2Payload)),
+    });
+
+    const evidence = await search("transformer");
+
+    expect(evidence.some((item) => item.source === "semanticscholar-corpus")).toBe(true);
+    expect(evidence.some((item) => item.source === "semanticscholar-citations")).toBe(true);
+    expect(evidence.some((item) => item.source === "semanticscholar-trend")).toBe(true);
+    expect(evidence.some((item) => item.source === "semanticscholar-cooccurrence")).toBe(true);
+    expect(evidence[0].url).toContain("semanticscholar.org/search");
+  });
+
+  it("throws when Semantic Scholar request fails", async () => {
+    const search = createSemanticScholarEvidenceProvider({
+      fetchImpl: fakeFetch(() => {
+        throw new Error("rate limited");
+      }),
+    });
+
+    await expect(search("offline keyword")).rejects.toThrow(EvidenceUnavailableError);
+  });
+});
+
+describe("createArxivEvidenceProvider", () => {
+  const arxivXml = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">
+  <opensearch:totalResults>18000</opensearch:totalResults>
+  <entry>
+    <id>https://arxiv.org/abs/2401.00001</id>
+    <title>Transformer Models for 3D Vision</title>
+    <published>2025-01-15T00:00:00Z</published>
+    <category term="cs.CV" />
+    <category term="cs.LG" />
+  </entry>
+  <entry>
+    <id>https://arxiv.org/abs/2301.00002</id>
+    <title>Calibration Methods in Robotics</title>
+    <published>2023-06-01T00:00:00Z</published>
+    <category term="cs.RO" />
+  </entry>
+</feed>`;
+
+  it("parses arXiv atom feeds", () => {
+    const feed = parseArxivFeed(arxivXml);
+    expect(feed.total).toBe(18000);
+    expect(feed.entries).toHaveLength(2);
+    expect(feed.entries[0].categories).toContain("cs.CV");
+  });
+
+  it("returns corpus, trend, recency, and co-occurrence evidence", async () => {
+    const search = createArxivEvidenceProvider({
+      fetchImpl: fakeFetch(async () => new Response(arxivXml, { status: 200 })),
+    });
+
+    const evidence = await search("3d vision");
+
+    expect(evidence.some((item) => item.source === "arxiv-corpus")).toBe(true);
+    expect(evidence.some((item) => item.source === "arxiv-trend")).toBe(true);
+    expect(evidence.some((item) => item.source === "arxiv-recency")).toBe(true);
+    expect(evidence.some((item) => item.source === "arxiv-cooccurrence")).toBe(true);
+    expect(evidence[0].url).toContain("arxiv.org/search");
+  });
+});
+
+describe("evidence provider registry", () => {
+  it("defaults to OpenAlex", () => {
+    expect(resolveDefaultEvidenceProvider(undefined)).toBe("openalex");
+    expect(resolveDefaultEvidenceProvider("arxiv")).toBe("arxiv");
+    expect(resolveDefaultEvidenceProvider("unknown")).toBe("openalex");
+  });
+
+  it("extracts title terms for Semantic Scholar co-occurrence", () => {
+    const terms = extractTitleTerms(
+      [{ title: "Transformer Attention for Vision" }, { title: "Vision Transformer Calibration" }],
+      "vision",
+    );
+    expect(terms.length).toBeGreaterThan(0);
+    expect(terms[0].term).toBeTruthy();
   });
 });

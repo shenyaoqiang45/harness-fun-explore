@@ -1,17 +1,32 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import Fastify from "fastify";
-import type { BacktraceRequest, ConfirmRequest, ExpandRequest, StartSessionRequest } from "../shared/types.js";
-import { ExplorationEngine, type EngineDeps } from "./engine.js";
-import { createOpenAlexEvidenceProvider } from "./evidence.js";
-import { createEngineDeps } from "./providers.js";
+import type {
+  BacktraceRequest,
+  ConfirmRequest,
+  EvidenceProviderId,
+  EvidenceProviderInfo,
+  ExpandRequest,
+  LlmProviderId,
+  LlmProviderInfo,
+  StartSessionRequest,
+} from "../shared/types.js";
+import { ExplorationEngine, type EngineBinding, type EngineDeps } from "./engine.js";
+import {
+  createEvidenceProvider,
+  listAvailableEvidenceProviders,
+  resolveDefaultEvidenceProvider,
+} from "./evidence-providers.js";
+import {
+  createEngineDeps,
+  listAvailableLlmProviders,
+  resolveDefaultLlmProvider,
+  type LlmEnvConfig,
+} from "./providers.js";
 import { TraceStore } from "./trace-store.js";
 
-function createProductionDeps(): EngineDeps {
-  return createEngineDeps({
-    provider:
-      (process.env.LLM_PROVIDER as "auto" | "minimax" | "kimi" | "deepseek" | undefined) ??
-      "auto",
+function readLlmEnvConfig(): LlmEnvConfig {
+  return {
     minimaxApiKey: process.env.MINIMAX_API_KEY,
     minimaxBaseUrl: process.env.MINIMAX_BASE_URL,
     minimaxModel: process.env.MINIMAX_MODEL,
@@ -21,10 +36,36 @@ function createProductionDeps(): EngineDeps {
     deepseekApiKey: process.env.DEEPSEEK_API_KEY,
     deepseekChatUrl: process.env.DEEPSEEK_CHAT_COMPLETIONS_URL,
     deepseekModel: process.env.DEEPSEEK_MODEL,
-    searchEvidence: createOpenAlexEvidenceProvider({
-      mailto: process.env.OPENALEX_MAILTO,
-    }),
-  });
+  };
+}
+
+function createProductionBinding(): EngineBinding {
+  const envConfig = readLlmEnvConfig();
+  const available = listAvailableLlmProviders(envConfig);
+  if (available.length === 0) {
+    throw new Error(
+      "No LLM API key configured. Set KIMI_API_KEY, DEEPSEEK_API_KEY, or MINIMAX_API_KEY.",
+    );
+  }
+
+  const defaultProvider = resolveDefaultLlmProvider(process.env.LLM_PROVIDER, available);
+  const availableEvidenceProviders = listAvailableEvidenceProviders();
+  const defaultEvidenceProvider = resolveDefaultEvidenceProvider(
+    process.env.EVIDENCE_PROVIDER,
+    availableEvidenceProviders,
+  );
+
+  return {
+    defaultProvider,
+    defaultEvidenceProvider,
+    resolve(session: { llmProvider: LlmProviderId; evidenceProvider: EvidenceProviderId }) {
+      const searchEvidence = createEvidenceProvider(session.evidenceProvider, {
+        openAlexMailto: process.env.OPENALEX_MAILTO,
+        semanticScholarApiKey: process.env.SEMANTIC_SCHOLAR_API_KEY,
+      });
+      return createEngineDeps({ ...envConfig, provider: session.llmProvider, searchEvidence });
+    },
+  };
 }
 
 function htmlShell(): string {
@@ -75,15 +116,16 @@ function htmlShell(): string {
       align-items: center;
       margin-bottom: 12px;
     }
-    #start-form { display: flex; gap: 8px; }
-    #keyword-input {
-      width: 280px;
+    #start-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    #keyword-input, #llm-provider, #evidence-provider {
       border: 1px solid rgba(212, 179, 111, 0.45);
       border-radius: 10px;
       background: rgba(7, 16, 34, 0.8);
       color: var(--text);
       padding: 10px;
     }
+    #keyword-input { width: 280px; }
+    #llm-provider, #evidence-provider { min-width: 170px; cursor: pointer; }
     button {
       border: 1px solid rgba(212, 179, 111, 0.6);
       border-radius: 10px;
@@ -104,6 +146,12 @@ function htmlShell(): string {
     .confirmed-node { fill: #ffe5a9; stroke: #f0bf62; stroke-width: 3; }
     .root-node { fill: #ffe5a9; stroke: #f0bf62; stroke-width: 2.4; }
     .leaf-node { fill: #b8e8ff; stroke: #64c7ff; stroke-width: 2; }
+    .clicked-leaf-node {
+      fill: #ffd27a;
+      stroke: #f0bf62;
+      stroke-width: 3;
+      filter: drop-shadow(0 0 6px rgba(255, 210, 122, 0.7));
+    }
     .off-path-node { opacity: 0.55; }
     .node-label { fill: var(--text); font-size: 11px; pointer-events: none; }
     .spine-label { font-size: 10px; fill: #dce8fb; }
@@ -164,7 +212,60 @@ function htmlShell(): string {
     }
     .evidence-row { margin-top: 4px; color: var(--muted); font-size: 12px; }
     .trace-head { color: var(--gold); margin-bottom: 4px; }
+    .trace-keyword {
+      color: #9fd4ff;
+      font-size: 13px;
+      font-weight: 500;
+      margin-bottom: 4px;
+    }
     .trace-time { color: var(--muted); margin-top: 3px; }
+    .round-progress {
+      margin-bottom: 12px;
+      padding: 10px 12px;
+      border: 1px solid rgba(212, 179, 111, 0.25);
+      border-radius: 10px;
+      background: rgba(6, 14, 29, 0.55);
+    }
+    .round-progress[hidden] { display: none; }
+    .round-progress-track {
+      height: 6px;
+      border-radius: 999px;
+      background: rgba(126, 155, 197, 0.25);
+      overflow: hidden;
+      margin-bottom: 10px;
+    }
+    .round-progress-fill {
+      height: 100%;
+      width: 0%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, #d4b36f, #64c7ff);
+      transition: width 0.35s ease;
+    }
+    .round-progress-steps {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .round-progress-steps li {
+      text-align: center;
+      padding: 4px 6px;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      transition: color 0.2s, border-color 0.2s, background 0.2s;
+    }
+    .round-progress-steps li.is-active {
+      color: var(--gold);
+      border-color: rgba(212, 179, 111, 0.45);
+      background: rgba(212, 179, 111, 0.08);
+    }
+    .round-progress-steps li.is-done {
+      color: #b8e8ff;
+    }
     @media (max-width: 960px) {
       .layout { grid-template-columns: 1fr; }
       #keyword-input { width: 100%; }
@@ -181,10 +282,26 @@ function htmlShell(): string {
       <div class="header">
         <form id="start-form">
           <input id="keyword-input" placeholder="Enter a seed keyword..." />
+          <select id="llm-provider" aria-label="LLM provider">
+            <option value="">Loading models...</option>
+          </select>
+          <select id="evidence-provider" aria-label="Evidence database">
+            <option value="">Loading databases...</option>
+          </select>
           <button type="submit">Launch Exploration</button>
           <button type="button" id="confirm-btn" disabled>Confirm Path</button>
         </form>
         <div id="status">No active session · Shift+click select · Ctrl+click filter trace</div>
+      </div>
+      <div id="round-progress" class="round-progress" hidden>
+        <div class="round-progress-track" aria-hidden="true">
+          <div id="round-progress-fill" class="round-progress-fill"></div>
+        </div>
+        <ol class="round-progress-steps" id="round-progress-steps">
+          <li data-step="1">① 扩展关键词</li>
+          <li data-step="2">② 检索证据</li>
+          <li data-step="3">③ 方向与画像</li>
+        </ol>
       </div>
       <div id="path-breadcrumb" class="path-breadcrumb" hidden></div>
       <svg id="tree" width="100%" preserveAspectRatio="xMinYMin meet"></svg>
@@ -223,7 +340,19 @@ async function readDistModule(segments: string[]): Promise<string> {
 
 export function buildApp(options?: { deps?: EngineDeps }) {
   const traceStore = new TraceStore();
-  const engine = new ExplorationEngine(options?.deps ?? createProductionDeps(), traceStore);
+  const availableProviders: LlmProviderInfo[] = options?.deps
+    ? [{ id: "kimi", label: "Test model", model: "mock" }]
+    : listAvailableLlmProviders(readLlmEnvConfig());
+  const availableEvidenceProviders: EvidenceProviderInfo[] = listAvailableEvidenceProviders();
+  const defaultProvider: LlmProviderId = options?.deps
+    ? "kimi"
+    : resolveDefaultLlmProvider(process.env.LLM_PROVIDER, availableProviders);
+  const defaultEvidenceProvider: EvidenceProviderId = resolveDefaultEvidenceProvider(
+    process.env.EVIDENCE_PROVIDER,
+    availableEvidenceProviders,
+  );
+  const binding: EngineBinding = options?.deps ?? createProductionBinding();
+  const engine = new ExplorationEngine(binding, traceStore);
   const app = Fastify({ logger: false });
 
   app.get("/", async (_req, reply) => {
@@ -255,12 +384,37 @@ export function buildApp(options?: { deps?: EngineDeps }) {
     }
   });
 
-  app.post<{ Body: StartSessionRequest }>("/api/start", async (req) => {
-    return engine.start(req.body.keyword);
+  app.get("/api/llm-providers", async () => ({
+    providers: availableProviders,
+    defaultProvider,
+  }));
+
+  app.get("/api/evidence-providers", async () => ({
+    providers: availableEvidenceProviders,
+    defaultProvider: defaultEvidenceProvider,
+  }));
+
+  app.post<{ Body: StartSessionRequest }>("/api/start", async (req, reply) => {
+    const provider = req.body.llmProvider ?? engine.getDefaultProvider();
+    if (!availableProviders.some((item) => item.id === provider)) {
+      return reply.status(400).send({ message: `LLM provider unavailable: ${provider}` });
+    }
+    const evidenceProvider = req.body.evidenceProvider ?? engine.getDefaultEvidenceProvider();
+    if (!availableEvidenceProviders.some((item) => item.id === evidenceProvider)) {
+      return reply.status(400).send({ message: `Evidence provider unavailable: ${evidenceProvider}` });
+    }
+    const session = engine.createSession(req.body.keyword, provider, evidenceProvider);
+    engine.scheduleExpand(session.sessionId, session.rootNodeId);
+    return engine.getSession(session.sessionId);
   });
 
   app.post<{ Body: ExpandRequest }>("/api/expand", async (req) => {
-    return engine.expand(req.body.sessionId, req.body.rootNodeId);
+    engine.scheduleExpand(req.body.sessionId, req.body.rootNodeId);
+    const session = engine.getSession(req.body.sessionId);
+    if (!session) {
+      throw new Error("Session not found");
+    }
+    return session;
   });
 
   app.post<{ Body: BacktraceRequest }>("/api/backtrace", async (req) => {

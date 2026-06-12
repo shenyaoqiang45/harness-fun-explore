@@ -3,7 +3,9 @@ import { scoreKeyword } from "../shared/scoring.js";
 import type {
   DirectionSummary,
   EvidenceItem,
+  EvidenceProviderId,
   KeywordNode,
+  LlmProviderId,
   PersonaHypothesis,
   RoundResult,
   SessionState,
@@ -19,6 +21,18 @@ export interface EngineDeps {
     topKeywords: string[],
     priorRounds: RoundResult[],
   ) => Promise<{ directionSummary: DirectionSummary; personaHypothesis: PersonaHypothesis }>;
+}
+
+export interface EngineDepsSource {
+  defaultProvider: LlmProviderId;
+  defaultEvidenceProvider: EvidenceProviderId;
+  resolve(session: Pick<SessionState, "llmProvider" | "evidenceProvider">): EngineDeps;
+}
+
+export type EngineBinding = EngineDeps | EngineDepsSource;
+
+function isDepsSource(binding: EngineBinding): binding is EngineDepsSource {
+  return "resolve" in binding;
 }
 
 function topAuthority(evidence: EvidenceItem[]): number {
@@ -44,11 +58,32 @@ export class ExplorationEngine {
   private readonly sessions = new Map<string, SessionState>();
 
   constructor(
-    private readonly deps: EngineDeps,
+    private readonly binding: EngineBinding,
     private readonly traces: TraceStore,
   ) {}
 
-  async start(keyword: string): Promise<SessionState> {
+  getDefaultProvider(): LlmProviderId {
+    return isDepsSource(this.binding) ? this.binding.defaultProvider : "kimi";
+  }
+
+  getDefaultEvidenceProvider(): EvidenceProviderId {
+    return isDepsSource(this.binding) ? this.binding.defaultEvidenceProvider : "openalex";
+  }
+
+  private resolveDeps(session: SessionState): EngineDeps {
+    return isDepsSource(this.binding)
+      ? this.binding.resolve({
+          llmProvider: session.llmProvider,
+          evidenceProvider: session.evidenceProvider,
+        })
+      : this.binding;
+  }
+
+  createSession(
+    keyword: string,
+    llmProvider?: LlmProviderId,
+    evidenceProvider?: EvidenceProviderId,
+  ): SessionState {
     const sessionId = randomUUID();
     const rootNodeId = randomUUID();
 
@@ -70,6 +105,8 @@ export class ExplorationEngine {
     const initialState: SessionState = {
       sessionId,
       status: "draft",
+      llmProvider: llmProvider ?? this.getDefaultProvider(),
+      evidenceProvider: evidenceProvider ?? this.getDefaultEvidenceProvider(),
       currentRootNodeId: rootNodeId,
       rootNodeId,
       nodes: { [rootNodeId]: rootNode },
@@ -78,7 +115,43 @@ export class ExplorationEngine {
     };
 
     this.sessions.set(sessionId, initialState);
-    return this.expand(sessionId, rootNodeId);
+    return initialState;
+  }
+
+  async start(keyword: string, llmProvider?: LlmProviderId): Promise<SessionState> {
+    const session = this.createSession(keyword, llmProvider);
+    return this.expand(session.sessionId, session.rootNodeId);
+  }
+
+  markExpanding(sessionId: string): void {
+    const session = this.mustGetSession(sessionId);
+    session.status = "expanding";
+  }
+
+  scheduleExpand(sessionId: string, rootNodeId: string): void {
+    this.markExpanding(sessionId);
+    void this.expand(sessionId, rootNodeId).catch((error: unknown) => {
+      this.markFailed(sessionId, error);
+    });
+  }
+
+  markFailed(sessionId: string, error: unknown): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      return;
+    }
+
+    session.status = "error";
+    const message = error instanceof Error ? error.message : String(error);
+    this.traces.append({
+      sessionId,
+      roundId: session.rounds.length + 1,
+      type: "tool-call-error",
+      toolName: "expand",
+      status: "error",
+      summary: message.slice(0, 200),
+      payload: { message },
+    });
   }
 
   async expand(sessionId: string, rootNodeId: string): Promise<SessionState> {
@@ -104,6 +177,7 @@ export class ExplorationEngine {
 
     const roundId = session.rounds.length + 1;
     session.status = "expanding";
+    const deps = this.resolveDeps(session);
 
     const t1 = Date.now();
     this.traces.append({
@@ -115,7 +189,7 @@ export class ExplorationEngine {
       payload: { rootKeyword: rootNode.keyword, rootNodeId },
     });
 
-    const candidates = (await this.deps.expandKeywords(rootNode.keyword)).slice(0, 10);
+    const candidates = (await deps.expandKeywords(rootNode.keyword)).slice(0, 10);
     this.traces.append({
       sessionId,
       roundId,
@@ -135,11 +209,11 @@ export class ExplorationEngine {
           roundId,
           type: "tool-call-start",
           toolName: "searchEvidence",
-          summary: "Searching evidence",
+          summary: `Searching evidence · ${keyword}`,
           payload: { keyword },
         });
 
-        const evidence = await this.deps.searchEvidence(keyword);
+        const evidence = await deps.searchEvidence(keyword);
 
         const score = scoreKeyword({
           semanticRelevance: semanticRelevance(rootNode.keyword, keyword),
@@ -164,7 +238,7 @@ export class ExplorationEngine {
           toolName: "searchEvidence",
           status: "ok",
           durationMs: Date.now() - t2,
-          summary: "Evidence collected",
+          summary: `Evidence collected · ${keyword}`,
           payload: { keyword, evidenceCount: evidence.length, nodeId: node.id },
         });
 
@@ -192,7 +266,7 @@ export class ExplorationEngine {
       payload: { rootKeyword: rootNode.keyword, topKeywords },
     });
 
-    const { directionSummary, personaHypothesis } = await this.deps.summarizeRound(
+    const { directionSummary, personaHypothesis } = await deps.summarizeRound(
       rootNode.keyword,
       topKeywords,
       session.rounds,

@@ -1,4 +1,25 @@
-export type SessionStatus = "draft" | "expanding" | "ranked" | "await-user-click" | "confirmed";
+export type SessionStatus =
+  | "draft"
+  | "expanding"
+  | "ranked"
+  | "await-user-click"
+  | "confirmed"
+  | "error";
+
+export type LlmProviderId = "kimi" | "deepseek" | "minimax";
+
+export interface LlmProviderInfo {
+  id: LlmProviderId;
+  label: string;
+  model: string;
+}
+
+export type EvidenceProviderId = "openalex" | "semantic-scholar" | "arxiv";
+
+export interface EvidenceProviderInfo {
+  id: EvidenceProviderId;
+  label: string;
+}
 
 export interface ScoreBreakdown {
   semanticRelevance: number;
@@ -69,6 +90,8 @@ export interface TraceEvent {
 export interface SessionState {
   sessionId: string;
   status: SessionStatus;
+  llmProvider: LlmProviderId;
+  evidenceProvider: EvidenceProviderId;
   currentRootNodeId: string;
   rootNodeId: string;
   nodes: Record<string, KeywordNode>;
@@ -83,6 +106,8 @@ export interface ExpandRequest {
 
 export interface StartSessionRequest {
   keyword: string;
+  llmProvider?: LlmProviderId;
+  evidenceProvider?: EvidenceProviderId;
 }
 
 export interface ConfirmRequest {

@@ -1,7 +1,13 @@
-import type { DirectionSummary, PersonaHypothesis, RoundResult } from "../shared/types.js";
+import type {
+  DirectionSummary,
+  LlmProviderId,
+  LlmProviderInfo,
+  PersonaHypothesis,
+  RoundResult,
+} from "../shared/types.js";
 import type { EngineDeps } from "./engine.js";
 
-type LlmProvider = "auto" | "minimax" | "kimi" | "deepseek";
+type LlmProvider = "auto" | LlmProviderId;
 
 interface LlmOptions {
   provider?: LlmProvider;
@@ -16,6 +22,64 @@ interface LlmOptions {
   deepseekModel?: string;
   userAgent?: string;
   searchEvidence: EngineDeps["searchEvidence"];
+}
+
+export type LlmEnvConfig = Omit<LlmOptions, "provider" | "searchEvidence">;
+
+function describeProvider(
+  config: LlmEnvConfig,
+  provider: LlmProviderId,
+  label: string,
+): LlmProviderInfo | null {
+  try {
+    const { model } = resolveLlmConfig({
+      ...config,
+      provider,
+      searchEvidence: async () => [],
+    });
+    return { id: provider, label, model };
+  } catch {
+    return null;
+  }
+}
+
+export function listAvailableLlmProviders(config: LlmEnvConfig): LlmProviderInfo[] {
+  const providers: LlmProviderInfo[] = [];
+  const kimiKey = config.apiKey?.trim();
+
+  if (kimiKey) {
+    const kimiLabel = kimiKey.startsWith("sk-kimi-") ? "Kimi Coding" : "Kimi Moonshot";
+    const kimi = describeProvider(config, "kimi", kimiLabel);
+    if (kimi) {
+      providers.push(kimi);
+    }
+  }
+
+  const deepseek = describeProvider(config, "deepseek", "DeepSeek Flash");
+  if (deepseek) {
+    providers.push(deepseek);
+  }
+
+  const minimax = describeProvider(config, "minimax", "MiniMax");
+  if (minimax) {
+    providers.push(minimax);
+  }
+
+  return providers;
+}
+
+export function resolveDefaultLlmProvider(
+  envProvider: string | undefined,
+  available: LlmProviderInfo[],
+): LlmProviderId {
+  if (
+    envProvider &&
+    envProvider !== "auto" &&
+    available.some((provider) => provider.id === envProvider)
+  ) {
+    return envProvider as LlmProviderId;
+  }
+  return available[0]?.id ?? "kimi";
 }
 
 function extractJsonObject(text: string): Record<string, unknown> {
@@ -39,6 +103,7 @@ async function callChatJson(args: {
   userPrompt: string;
   temperature?: number;
   userAgent?: string;
+  disableThinking?: boolean;
 }): Promise<Record<string, unknown>> {
   const headers: Record<string, string> = {
     "content-type": "application/json",
@@ -49,18 +114,24 @@ async function callChatJson(args: {
     headers["user-agent"] = args.userAgent;
   }
 
+  const body: Record<string, unknown> = {
+    model: args.model,
+    temperature: args.temperature ?? 0.3,
+    messages: [
+      { role: "system", content: args.systemPrompt },
+      { role: "user", content: args.userPrompt },
+    ],
+    response_format: { type: "json_object" },
+  };
+
+  if (args.model.startsWith("deepseek-v4")) {
+    body.thinking = { type: "disabled" };
+  }
+
   const response = await fetch(args.chatCompletionsUrl, {
     method: "POST",
     headers,
-    body: JSON.stringify({
-      model: args.model,
-      temperature: args.temperature ?? 0.3,
-      messages: [
-        { role: "system", content: args.systemPrompt },
-        { role: "user", content: args.userPrompt },
-      ],
-      response_format: { type: "json_object" },
-    }),
+    body: JSON.stringify(body),
   });
 
   if (!response.ok) {
@@ -102,7 +173,7 @@ function resolveLlmConfig(options: LlmOptions): {
       apiKey,
       chatCompletionsUrl:
         options.deepseekChatUrl ?? "https://api.deepseek.com/chat/completions",
-      model: options.deepseekModel ?? "deepseek-chat",
+      model: options.deepseekModel ?? "deepseek-v4-flash",
     };
   }
 

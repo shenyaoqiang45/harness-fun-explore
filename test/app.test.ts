@@ -2,6 +2,44 @@ import { afterAll, describe, expect, it } from "vitest";
 import type { EngineDeps } from "../src/server/engine.js";
 import { buildApp } from "../src/server/app.js";
 
+async function waitForSessionReady(
+  app: ReturnType<typeof buildApp>,
+  sessionId: string,
+): Promise<{
+  sessionId: string;
+  llmProvider: string;
+  evidenceProvider: string;
+  status: string;
+  rounds: Array<{ candidateKeywords: string[]; topNodeIds: string[] }>;
+  rootNodeId: string;
+}> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/session/${sessionId}`,
+    });
+    const body = response.json() as {
+      sessionId: string;
+      llmProvider: string;
+      evidenceProvider: string;
+      status: string;
+      rounds: Array<{ candidateKeywords: string[]; topNodeIds: string[] }>;
+      rootNodeId: string;
+    };
+
+    if (body.status === "await-user-click" || body.status === "confirmed") {
+      return body;
+    }
+    if (body.status === "error") {
+      throw new Error("Session entered error state");
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+
+  throw new Error("Timed out waiting for session round to complete");
+}
+
 function makeTestDeps(): EngineDeps {
   return {
     async expandKeywords(seed: string) {
@@ -41,21 +79,60 @@ describe("HTTP API", () => {
     await app.close();
   });
 
-  it("starts a session with one ranked round", async () => {
+  it("lists configured LLM providers", async () => {
     const response = await app.inject({
-      method: "POST",
-      url: "/api/start",
-      payload: { keyword: "harness" },
+      method: "GET",
+      url: "/api/llm-providers",
     });
 
     expect(response.statusCode).toBe(200);
     const body = response.json() as {
+      providers: Array<{ id: string; label: string; model: string }>;
+      defaultProvider: string;
+    };
+    expect(body.providers.length).toBeGreaterThan(0);
+    expect(body.defaultProvider).toBeTruthy();
+  });
+
+  it("lists evidence database providers", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/evidence-providers",
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      providers: Array<{ id: string; label: string }>;
+      defaultProvider: string;
+    };
+    expect(body.providers.map((item) => item.id)).toEqual([
+      "openalex",
+      "semantic-scholar",
+      "arxiv",
+    ]);
+    expect(body.defaultProvider).toBe("openalex");
+  });
+
+  it("starts a session with one ranked round", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/start",
+      payload: { keyword: "harness", evidenceProvider: "arxiv" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const kickoff = response.json() as {
       sessionId: string;
-      rounds: Array<{ candidateKeywords: string[]; topNodeIds: string[] }>;
+      llmProvider: string;
+      evidenceProvider: string;
       status: string;
     };
+    expect(["draft", "expanding"]).toContain(kickoff.status);
+    expect(kickoff.evidenceProvider).toBe("arxiv");
+    const body = await waitForSessionReady(app, kickoff.sessionId);
 
     expect(body.sessionId).toBeTruthy();
+    expect(body.llmProvider).toBeTruthy();
     expect(body.rounds).toHaveLength(1);
     expect(body.rounds[0].candidateKeywords).toHaveLength(10);
     expect(body.rounds[0].topNodeIds).toHaveLength(5);
@@ -68,10 +145,8 @@ describe("HTTP API", () => {
       url: "/api/start",
       payload: { keyword: "harness" },
     });
-    const session = start.json() as {
-      sessionId: string;
-      rounds: Array<{ topNodeIds: string[] }>;
-    };
+    const kickoff = start.json() as { sessionId: string };
+    const session = await waitForSessionReady(app, kickoff.sessionId);
 
     const leafId = session.rounds[0].topNodeIds[0];
     const expand = await app.inject({
@@ -81,7 +156,7 @@ describe("HTTP API", () => {
     });
 
     expect(expand.statusCode).toBe(200);
-    const expanded = expand.json() as { rounds: unknown[]; status: string };
+    const expanded = await waitForSessionReady(app, session.sessionId);
     expect(expanded.rounds).toHaveLength(2);
     expect(expanded.status).toBe("await-user-click");
 
@@ -106,7 +181,8 @@ describe("HTTP API", () => {
       url: "/api/start",
       payload: { keyword: "trace" },
     });
-    const session = start.json() as { sessionId: string };
+    const kickoff = start.json() as { sessionId: string };
+    const session = await waitForSessionReady(app, kickoff.sessionId);
 
     const sessionResp = await app.inject({
       method: "GET",
@@ -129,7 +205,8 @@ describe("HTTP API", () => {
       url: "/api/start",
       payload: { keyword: "missing" },
     });
-    const session = start.json() as { sessionId: string };
+    const kickoff = start.json() as { sessionId: string };
+    const session = await waitForSessionReady(app, kickoff.sessionId);
 
     const response = await app.inject({
       method: "GET",
@@ -164,7 +241,8 @@ describe("HTTP API", () => {
       url: "/api/start",
       payload: { keyword: "backtrace" },
     });
-    const session = start.json() as { sessionId: string; rootNodeId: string; rounds: Array<{ topNodeIds: string[] }> };
+    const kickoff = start.json() as { sessionId: string };
+    const session = await waitForSessionReady(app, kickoff.sessionId);
     const leafId = session.rounds[0].topNodeIds[0];
 
     await app.inject({
@@ -172,6 +250,7 @@ describe("HTTP API", () => {
       url: "/api/expand",
       payload: { sessionId: session.sessionId, rootNodeId: leafId },
     });
+    await waitForSessionReady(app, session.sessionId);
 
     const response = await app.inject({
       method: "POST",

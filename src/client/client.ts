@@ -51,8 +51,21 @@ interface TraceEvent {
   payload?: Record<string, unknown>;
 }
 
+interface LlmProviderInfo {
+  id: string;
+  label: string;
+  model: string;
+}
+
+interface EvidenceProviderInfo {
+  id: string;
+  label: string;
+}
+
 interface SessionState {
   sessionId: string;
+  llmProvider: string;
+  evidenceProvider: string;
   rootNodeId: string;
   currentRootNodeId: string;
   confirmedPath: string[];
@@ -69,22 +82,219 @@ interface SessionState {
 
 const form = document.getElementById("start-form") as HTMLFormElement;
 const input = document.getElementById("keyword-input") as HTMLInputElement;
+const providerSelect = document.getElementById("llm-provider") as HTMLSelectElement;
+const evidenceProviderSelect = document.getElementById("evidence-provider") as HTMLSelectElement;
 const confirmBtn = document.getElementById("confirm-btn") as HTMLButtonElement;
 const roundsEl = document.getElementById("rounds") as HTMLDivElement;
 const traceEl = document.getElementById("trace") as HTMLDivElement;
 const statusEl = document.getElementById("status") as HTMLDivElement;
 const breadcrumbEl = document.getElementById("path-breadcrumb") as HTMLDivElement;
+const roundProgressEl = document.getElementById("round-progress") as HTMLDivElement;
+const roundProgressFillEl = document.getElementById("round-progress-fill") as HTMLDivElement;
+const roundProgressStepsEl = document.getElementById("round-progress-steps") as HTMLOListElement;
 
 const svg = window.d3.select("#tree");
 
 let currentSessionId = "";
 let selectedNodeId = "";
 let highlightedNodeId = "";
+let clickedLeafId = "";
 let activeTraceEventId = "";
 let traceRoundFilter: number | null = null;
 let currentSessionStatus = "";
 let currentSessionState: SessionState | null = null;
 let traceEvents: TraceEvent[] = [];
+let availableProviders: LlmProviderInfo[] = [];
+let availableEvidenceProviders: EvidenceProviderInfo[] = [];
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function traceRoundEvents(trace: TraceEvent[], roundId: number): TraceEvent[] {
+  return trace.filter((event) => event.roundId === roundId);
+}
+
+function hasToolStart(events: TraceEvent[], toolName: string): boolean {
+  return events.some((event) => event.toolName === toolName && event.type === "tool-call-start");
+}
+
+function hasToolEnd(events: TraceEvent[], toolName: string): boolean {
+  return events.some(
+    (event) => event.toolName === toolName && event.type === "tool-call-end" && event.status === "ok",
+  );
+}
+
+function deriveRoundProgress(trace: TraceEvent[], roundId: number): { step: number; percent: number } {
+  const events = traceRoundEvents(trace, roundId);
+  const evidenceStarts = events.filter(
+    (event) => event.toolName === "searchEvidence" && event.type === "tool-call-start",
+  ).length;
+  const evidenceEnds = events.filter(
+    (event) => event.toolName === "searchEvidence" && event.type === "tool-call-end",
+  ).length;
+
+  if (hasToolEnd(events, "summarizeRound")) {
+    return { step: 3, percent: 100 };
+  }
+  if (hasToolStart(events, "summarizeRound")) {
+    return { step: 3, percent: 82 };
+  }
+  if (hasToolEnd(events, "expandKeywords")) {
+    const evidenceRatio = Math.min(1, evidenceEnds / Math.max(evidenceStarts, 10));
+    return { step: 2, percent: 34 + evidenceRatio * 46 };
+  }
+  if (hasToolStart(events, "expandKeywords")) {
+    return { step: 1, percent: 18 };
+  }
+  return { step: 1, percent: 6 };
+}
+
+function renderRoundProgress(trace: TraceEvent[], roundId: number): void {
+  const { step, percent } = deriveRoundProgress(trace, roundId);
+  roundProgressFillEl.style.width = `${percent}%`;
+
+  for (const item of roundProgressStepsEl.querySelectorAll("li")) {
+    const itemStep = Number(item.getAttribute("data-step"));
+    item.classList.remove("is-active", "is-done");
+    if (itemStep < step) {
+      item.classList.add("is-done");
+    } else if (itemStep === step) {
+      item.classList.add("is-active");
+    }
+  }
+}
+
+function showRoundProgress(): void {
+  roundProgressEl.hidden = false;
+  roundProgressFillEl.style.width = "0%";
+  for (const item of roundProgressStepsEl.querySelectorAll("li")) {
+    item.classList.remove("is-active", "is-done");
+  }
+  roundProgressStepsEl.querySelector('li[data-step="1"]')?.classList.add("is-active");
+}
+
+function hideRoundProgress(): void {
+  roundProgressEl.hidden = true;
+}
+
+async function waitForRoundComplete(sessionId: string): Promise<SessionState> {
+  showRoundProgress();
+  const targetRoundId = (currentSessionState?.rounds.length ?? 0) + 1;
+
+  while (true) {
+    const [state, trace] = await Promise.all([
+      apiJson<SessionState>(`/api/session/${sessionId}`),
+      apiJson<TraceEvent[]>(`/api/trace/${sessionId}`),
+    ]);
+
+    currentSessionState = state;
+    currentSessionStatus = state.status;
+    traceEvents = trace;
+
+    renderRoundProgress(trace, targetRoundId);
+    renderTracePanel();
+
+    const targetRoundDone = state.rounds.some((round) => round.roundId === targetRoundId);
+    if (
+      targetRoundDone &&
+      (state.status === "await-user-click" || state.status === "confirmed")
+    ) {
+      hideRoundProgress();
+      return state;
+    }
+
+    if (state.status === "error") {
+      hideRoundProgress();
+      const failed = trace.find((event) => event.type === "tool-call-error");
+      throw new Error(failed?.summary ?? "Round failed");
+    }
+
+    await sleep(350);
+  }
+}
+
+function providerLabel(providerId: string): string {
+  const provider = availableProviders.find((item) => item.id === providerId);
+  return provider ? `${provider.label} · ${provider.model}` : providerId;
+}
+
+function evidenceProviderLabel(providerId: string): string {
+  const provider = availableEvidenceProviders.find((item) => item.id === providerId);
+  return provider?.label ?? providerId;
+}
+
+async function loadLlmProviders(): Promise<void> {
+  const data = await apiJson<{ providers: LlmProviderInfo[]; defaultProvider: string }>(
+    "/api/llm-providers",
+  );
+  availableProviders = data.providers;
+  providerSelect.innerHTML = "";
+
+  for (const provider of data.providers) {
+    const option = document.createElement("option");
+    option.value = provider.id;
+    option.textContent = `${provider.label} · ${provider.model}`;
+    providerSelect.appendChild(option);
+  }
+
+  const saved = localStorage.getItem("llm-provider");
+  const initial =
+    saved && data.providers.some((provider) => provider.id === saved)
+      ? saved
+      : data.defaultProvider;
+  if (initial) {
+    providerSelect.value = initial;
+  }
+}
+
+providerSelect.addEventListener("change", () => {
+  localStorage.setItem("llm-provider", providerSelect.value);
+});
+
+async function loadEvidenceProviders(): Promise<void> {
+  const data = await apiJson<{ providers: EvidenceProviderInfo[]; defaultProvider: string }>(
+    "/api/evidence-providers",
+  );
+  availableEvidenceProviders = data.providers;
+  evidenceProviderSelect.innerHTML = "";
+
+  for (const provider of data.providers) {
+    const option = document.createElement("option");
+    option.value = provider.id;
+    option.textContent = provider.label;
+    evidenceProviderSelect.appendChild(option);
+  }
+
+  const saved = localStorage.getItem("evidence-provider");
+  const initial =
+    saved && data.providers.some((provider) => provider.id === saved)
+      ? saved
+      : data.defaultProvider;
+  if (initial) {
+    evidenceProviderSelect.value = initial;
+  }
+}
+
+evidenceProviderSelect.addEventListener("change", () => {
+  localStorage.setItem("evidence-provider", evidenceProviderSelect.value);
+});
+
+void Promise.all([loadLlmProviders(), loadEvidenceProviders()]).catch((error: unknown) => {
+  const message = error instanceof Error ? error.message : "Unknown error";
+  providerSelect.innerHTML = "";
+  const option = document.createElement("option");
+  option.value = "";
+  option.textContent = "Models unavailable";
+  providerSelect.appendChild(option);
+  providerSelect.disabled = true;
+  evidenceProviderSelect.innerHTML = "";
+  const evidenceOption = document.createElement("option");
+  evidenceOption.value = "";
+  evidenceOption.textContent = "Databases unavailable";
+  evidenceProviderSelect.appendChild(evidenceOption);
+  evidenceProviderSelect.disabled = true;
+  statusEl.textContent = `Failed to load providers: ${message}`;
+});
 
 async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(url, init);
@@ -250,16 +460,25 @@ async function handleNodeClick(event: MouseEvent, node: PlacedNode, state: Sessi
       return;
     }
 
+    if (node.kind === "leaf") {
+      clickedLeafId = node.id;
+    }
+    selectedNodeId = node.id;
+    highlightedNodeId = node.id;
+    renderTree(state);
+
     statusEl.textContent = "Expanding branch...";
+    confirmBtn.disabled = true;
     traceRoundFilter = null;
-    await apiJson("/api/expand", {
+    const kickoff = await apiJson<SessionState>("/api/expand", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ sessionId: currentSessionId, rootNodeId: node.id }),
     });
-    selectedNodeId = node.id;
-    highlightedNodeId = node.id;
+    currentSessionState = kickoff;
+    currentSessionStatus = kickoff.status;
     activeTraceEventId = "";
+    await waitForRoundComplete(currentSessionId);
     await refreshSession();
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
@@ -376,8 +595,11 @@ function renderTree(state: SessionState): void {
       if (d.id === selectedNodeId) {
         classes.push("selected-node");
       }
-      if (d.id === highlightedNodeId) {
+      if (d.id === highlightedNodeId && d.id !== clickedLeafId) {
         classes.push("highlighted-node");
+      }
+      if (d.id === clickedLeafId) {
+        classes.push("clicked-leaf-node");
       }
       if (confirmed.has(d.id)) {
         classes.push("confirmed-node");
@@ -456,6 +678,14 @@ function renderRounds(state: SessionState): void {
   }
 }
 
+function traceCandidateKeyword(event: TraceEvent): string | null {
+  if (event.toolName !== "searchEvidence") {
+    return null;
+  }
+  const keyword = event.payload?.keyword;
+  return typeof keyword === "string" && keyword.length > 0 ? keyword : null;
+}
+
 function renderTracePanel(): void {
   traceEl.innerHTML = "";
 
@@ -486,11 +716,27 @@ function renderTracePanel(): void {
     if (event.id === activeTraceEventId) {
       item.classList.add("trace-item-active");
     }
-    item.innerHTML = `
-      <div class="trace-head">R${event.roundId} · ${event.type}${event.toolName ? ` · ${event.toolName}` : ""}</div>
-      <div>${event.summary}</div>
-      <div class="trace-time">${new Date(event.timestamp).toLocaleTimeString()}</div>
-    `;
+    const head = document.createElement("div");
+    head.className = "trace-head";
+    head.textContent = `R${event.roundId} · ${event.type}${event.toolName ? ` · ${event.toolName}` : ""}`;
+    item.appendChild(head);
+
+    const candidateKeyword = traceCandidateKeyword(event);
+    if (candidateKeyword) {
+      const keywordEl = document.createElement("div");
+      keywordEl.className = "trace-keyword";
+      keywordEl.textContent = `候选词 · ${candidateKeyword}`;
+      item.appendChild(keywordEl);
+    }
+
+    const summary = document.createElement("div");
+    summary.textContent = event.summary;
+    item.appendChild(summary);
+
+    const time = document.createElement("div");
+    time.className = "trace-time";
+    time.textContent = new Date(event.timestamp).toLocaleTimeString();
+    item.appendChild(time);
     item.addEventListener("click", () => {
       activeTraceEventId = event.id;
       const nodeId = resolveNodeIdForTrace(event);
@@ -519,10 +765,12 @@ async function refreshSession(): Promise<void> {
   currentSessionState = state;
   currentSessionStatus = state.status;
   confirmBtn.disabled = state.status === "confirmed" || !selectedNodeId;
+  const providerText = providerLabel(state.llmProvider);
+  const evidenceText = evidenceProviderLabel(state.evidenceProvider);
   statusEl.textContent =
     state.status === "confirmed"
-      ? `Session ${state.sessionId.slice(0, 8)} · confirmed`
-      : `Session ${state.sessionId.slice(0, 8)} · ${state.status}`;
+      ? `Session ${state.sessionId.slice(0, 8)} · ${providerText} · ${evidenceText} · confirmed`
+      : `Session ${state.sessionId.slice(0, 8)} · ${providerText} · ${evidenceText} · ${state.status}`;
   renderTree(state);
   renderRounds(state);
   await loadTrace();
@@ -557,21 +805,37 @@ form.addEventListener("submit", async (event) => {
 
   try {
     statusEl.textContent = "Starting exploration...";
+    providerSelect.disabled = true;
+    evidenceProviderSelect.disabled = true;
+    confirmBtn.disabled = true;
+    input.disabled = true;
+    form.querySelector('button[type="submit"]')?.setAttribute("disabled", "true");
     traceRoundFilter = null;
     activeTraceEventId = "";
     highlightedNodeId = "";
-    const state = await apiJson<SessionState>("/api/start", {
+    clickedLeafId = "";
+    const kickoff = await apiJson<SessionState>("/api/start", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ keyword }),
+      body: JSON.stringify({
+        keyword,
+        llmProvider: providerSelect.value || undefined,
+        evidenceProvider: evidenceProviderSelect.value || undefined,
+      }),
     });
 
-    currentSessionId = state.sessionId;
-    selectedNodeId = state.currentRootNodeId;
-    highlightedNodeId = state.currentRootNodeId;
+    currentSessionId = kickoff.sessionId;
+    selectedNodeId = kickoff.currentRootNodeId;
+    highlightedNodeId = kickoff.currentRootNodeId;
+    await waitForRoundComplete(currentSessionId);
     await refreshSession();
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     statusEl.textContent = `Start failed: ${message}`;
+  } finally {
+    input.disabled = false;
+    form.querySelector('button[type="submit"]')?.removeAttribute("disabled");
+    providerSelect.disabled = availableProviders.length === 0;
+    evidenceProviderSelect.disabled = availableEvidenceProviders.length === 0;
   }
 });

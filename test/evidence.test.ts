@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { parseArxivFeed, createArxivEvidenceProvider } from "../src/server/evidence-arxiv.js";
+import { createSerialGate, fetchWith429Retry } from "../src/server/evidence-rate-limit.js";
 import {
   createSemanticScholarEvidenceProvider,
   extractTitleTerms,
@@ -157,6 +158,7 @@ describe("createSemanticScholarEvidenceProvider", () => {
   it("returns corpus, citation, trend, and co-occurrence evidence", async () => {
     const search = createSemanticScholarEvidenceProvider({
       fetchImpl: fakeFetch(() => jsonResponse(s2Payload)),
+      minIntervalMs: 0,
     });
 
     const evidence = await search("transformer");
@@ -173,9 +175,89 @@ describe("createSemanticScholarEvidenceProvider", () => {
       fetchImpl: fakeFetch(() => {
         throw new Error("rate limited");
       }),
+      minIntervalMs: 0,
+      maxRetries: 0,
     });
 
     await expect(search("offline keyword")).rejects.toThrow(EvidenceUnavailableError);
+  });
+
+  it("retries after HTTP 429 and eventually succeeds", async () => {
+    let calls = 0;
+    const search = createSemanticScholarEvidenceProvider({
+      fetchImpl: fakeFetch(() => {
+        calls += 1;
+        if (calls === 1) {
+          return new Response("throttled", {
+            status: 429,
+            headers: { "retry-after": "0" },
+          });
+        }
+        return jsonResponse(s2Payload);
+      }),
+      minIntervalMs: 0,
+    });
+
+    const evidence = await search("transformer");
+
+    expect(calls).toBe(2);
+    expect(evidence.some((item) => item.source === "semanticscholar-corpus")).toBe(true);
+  });
+
+  it("serializes concurrent searches to respect rate limits", async () => {
+    const startedAt: number[] = [];
+    const search = createSemanticScholarEvidenceProvider({
+      fetchImpl: fakeFetch(async () => {
+        startedAt.push(Date.now());
+        return jsonResponse(s2Payload);
+      }),
+      minIntervalMs: 40,
+    });
+
+    await Promise.all([search("alpha"), search("beta"), search("gamma")]);
+
+    expect(startedAt).toHaveLength(3);
+    expect(startedAt[1] - startedAt[0]).toBeGreaterThanOrEqual(35);
+    expect(startedAt[2] - startedAt[1]).toBeGreaterThanOrEqual(35);
+  });
+});
+
+describe("evidence rate limiting helpers", () => {
+  it("fetchWith429Retry honors retry-after", async () => {
+    let calls = 0;
+    const response = await fetchWith429Retry({
+      fetchImpl: fakeFetch(() => {
+        calls += 1;
+        if (calls === 1) {
+          return new Response("busy", {
+            status: 429,
+            headers: { "retry-after": "0" },
+          });
+        }
+        return jsonResponse({ ok: true });
+      }),
+      url: "https://example.com",
+      timeoutMs: 5000,
+    });
+
+    expect(calls).toBe(2);
+    expect(response.status).toBe(200);
+  });
+
+  it("createSerialGate spaces task starts", async () => {
+    const startedAt: number[] = [];
+    const runQueued = createSerialGate(30);
+
+    await Promise.all([
+      runQueued(async () => {
+        startedAt.push(Date.now());
+      }),
+      runQueued(async () => {
+        startedAt.push(Date.now());
+      }),
+    ]);
+
+    expect(startedAt[1] - startedAt[0]).toBeGreaterThanOrEqual(25);
   });
 });
 

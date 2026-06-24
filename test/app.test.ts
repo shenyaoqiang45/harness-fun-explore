@@ -43,7 +43,7 @@ async function waitForSessionReady(
 function makeTestDeps(): EngineDeps {
   return {
     async expandKeywords(seed: string) {
-      return Array.from({ length: 10 }, (_, index) => `${seed}-${index + 1}`);
+      return Array.from({ length: 5 }, (_, index) => `${seed}-${index + 1}`);
     },
     async searchEvidence(keyword: string) {
       return [
@@ -134,7 +134,7 @@ describe("HTTP API", () => {
     expect(body.sessionId).toBeTruthy();
     expect(body.llmProvider).toBeTruthy();
     expect(body.rounds).toHaveLength(1);
-    expect(body.rounds[0].candidateKeywords).toHaveLength(10);
+    expect(body.rounds[0].candidateKeywords).toHaveLength(5);
     expect(body.rounds[0].topNodeIds).toHaveLength(5);
     expect(body.status).toBe("await-user-click");
   });

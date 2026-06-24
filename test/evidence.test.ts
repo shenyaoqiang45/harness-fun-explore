@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { parseArxivFeed, createArxivEvidenceProvider } from "../src/server/evidence-arxiv.js";
-import { createSerialGate, fetchWith429Retry } from "../src/server/evidence-rate-limit.js";
+import { createConcurrencyLimiter, createSerialGate, fetchWith429Retry } from "../src/server/evidence-rate-limit.js";
 import {
   createSemanticScholarEvidenceProvider,
   extractTitleTerms,
@@ -9,6 +9,7 @@ import { resolveDefaultEvidenceProvider } from "../src/server/evidence-providers
 import {
   computeTrendMetrics,
   createOpenAlexEvidenceProvider,
+  deriveTrendGroupsFromWorks,
   EvidenceUnavailableError,
   extractCooccurringTerms,
   normalizeCitationAuthority,
@@ -103,12 +104,8 @@ describe("academic metric helpers", () => {
 describe("createOpenAlexEvidenceProvider", () => {
   it("returns corpus, citation, trend, and co-occurrence evidence", async () => {
     const search = createOpenAlexEvidenceProvider({
-      fetchImpl: fakeFetch((url) => {
-        if (url.includes("group_by=publication_year")) {
-          return jsonResponse(trendPayload);
-        }
-        return jsonResponse(worksPayload);
-      }),
+      fetchImpl: fakeFetch(() => jsonResponse(worksPayload)),
+      maxConcurrent: 0,
     });
 
     const evidence = await search("large language model");
@@ -120,29 +117,94 @@ describe("createOpenAlexEvidenceProvider", () => {
     expect(evidence[0].url).toContain("openalex.org/works");
   });
 
+  it("sends api_key when configured", async () => {
+    let capturedUrl = "";
+    const search = createOpenAlexEvidenceProvider({
+      apiKey: "test-key",
+      fetchImpl: fakeFetch((url) => {
+        capturedUrl = url;
+        return jsonResponse(worksPayload);
+      }),
+      maxConcurrent: 0,
+    });
+
+    await search("transformer");
+    expect(capturedUrl).toContain("api_key=test-key");
+  });
+
   it("throws when every OpenAlex request fails", async () => {
     const search = createOpenAlexEvidenceProvider({
       fetchImpl: fakeFetch(() => {
         throw new Error("network down");
       }),
+      maxConcurrent: 0,
+      maxRetries: 0,
     });
 
     await expect(search("offline keyword")).rejects.toThrow(EvidenceUnavailableError);
   });
 
-  it("uses only works payload when trend grouping fails", async () => {
+  it("omits trend when works have no publication years", async () => {
     const search = createOpenAlexEvidenceProvider({
-      fetchImpl: fakeFetch((url) => {
-        if (url.includes("group_by=publication_year")) {
-          throw new Error("group_by unavailable");
-        }
-        return jsonResponse(worksPayload);
-      }),
+      fetchImpl: fakeFetch(() =>
+        jsonResponse({
+          meta: { count: 100 },
+          results: [{ id: "W1", cited_by_count: 10, publication_year: null }],
+        }),
+      ),
+      maxConcurrent: 0,
     });
 
     const evidence = await search("transformer");
     expect(evidence.some((item) => item.source === "openalex-corpus")).toBe(true);
     expect(evidence.some((item) => item.source === "openalex-trend")).toBe(false);
+  });
+
+  it("derives trend groups from top-cited works", () => {
+    const groups = deriveTrendGroupsFromWorks(worksPayload.results);
+    expect(groups.some((group) => group.key === 2024)).toBe(true);
+  });
+
+  it("retries after HTTP 429 and eventually succeeds", async () => {
+    let calls = 0;
+    const search = createOpenAlexEvidenceProvider({
+      fetchImpl: fakeFetch(() => {
+        calls += 1;
+        if (calls === 1) {
+          return new Response("throttled", {
+            status: 429,
+            headers: { "retry-after": "0" },
+          });
+        }
+        return jsonResponse(worksPayload);
+      }),
+      maxConcurrent: 0,
+    });
+
+    const evidence = await search("transformer");
+
+    expect(calls).toBeGreaterThan(1);
+    expect(evidence.some((item) => item.source === "openalex-corpus")).toBe(true);
+  });
+
+  it("limits concurrent OpenAlex requests", async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const search = createOpenAlexEvidenceProvider({
+      fetchImpl: fakeFetch(async () => {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        inFlight -= 1;
+        return jsonResponse(worksPayload);
+      }),
+      maxConcurrent: 2,
+    });
+
+    await Promise.all([search("alpha"), search("beta"), search("gamma"), search("delta")]);
+
+    expect(peak).toBeLessThanOrEqual(2);
+    expect(peak).toBeGreaterThan(1);
   });
 });
 
@@ -258,6 +320,25 @@ describe("evidence rate limiting helpers", () => {
     ]);
 
     expect(startedAt[1] - startedAt[0]).toBeGreaterThanOrEqual(25);
+  });
+
+  it("createConcurrencyLimiter caps parallel work", async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const runLimited = createConcurrencyLimiter(2);
+
+    await Promise.all(
+      Array.from({ length: 4 }, () =>
+        runLimited(async () => {
+          inFlight += 1;
+          peak = Math.max(peak, inFlight);
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          inFlight -= 1;
+        }),
+      ),
+    );
+
+    expect(peak).toBe(2);
   });
 });
 

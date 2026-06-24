@@ -3,13 +3,13 @@ import { ExplorationEngine } from "../src/server/engine.js";
 import { TraceStore } from "../src/server/trace-store.js";
 
 describe("ExplorationEngine", () => {
-  it("creates a round with 10 candidates and 5 selected nodes", async () => {
+  it("creates a round with 5 candidates and 5 selected nodes", async () => {
     const traces = new TraceStore();
     const engine = new ExplorationEngine(makeDeps(), traces);
 
     const session = await engine.start("harness");
     expect(session.rounds).toHaveLength(1);
-    expect(session.rounds[0].candidateKeywords).toHaveLength(10);
+    expect(session.rounds[0].candidateKeywords).toHaveLength(5);
     expect(session.rounds[0].topNodeIds).toHaveLength(5);
     expect(session.status).toBe("await-user-click");
 
@@ -124,7 +124,7 @@ describe("ExplorationEngine", () => {
 function makeDeps() {
   return {
     async expandKeywords(seed: string) {
-      return Array.from({ length: 10 }, (_, index) => `${seed}-${index + 1}`);
+      return Array.from({ length: 5 }, (_, index) => `${seed}-${index + 1}`);
     },
     async searchEvidence(keyword: string) {
       return [

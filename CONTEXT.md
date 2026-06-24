@@ -5,7 +5,7 @@
 | Term | Definition |
 | ---- | ---------- |
 | **Session** | A single exploration run from seed keyword to optional confirmation. |
-| **Round** | One expand cycle: 10 candidate keywords → evidence scoring → Top 5 leaves. |
+| **Round** | One expand cycle: 5 candidate keywords → evidence scoring → Top 5 leaves. |
 | **Keyword node** | A node in the exploration tree (root, round root, or leaf). |
 | **Round root** | The keyword the user chose to expand in a given round. |
 | **Leaf node** | A Top-5 candidate from the latest round; clickable to start the next round. |

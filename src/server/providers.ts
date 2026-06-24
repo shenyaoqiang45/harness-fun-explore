@@ -230,7 +230,7 @@ export function createEngineDeps(options: LlmOptions): EngineDeps {
         userAgent,
         systemPrompt:
           "You generate keyword candidates for recursive topic exploration. Return strict JSON with an array field named keywords.",
-        userPrompt: `Seed keyword: ${seed}\nReturn exactly 10 concise related keywords in Chinese.`,
+        userPrompt: `Seed keyword: ${seed}\nReturn exactly 5 concise related keywords in Chinese.`,
         temperature: fixedTemperature ?? 0.5,
       });
 
@@ -238,11 +238,11 @@ export function createEngineDeps(options: LlmOptions): EngineDeps {
       const normalized = keywords
         .map((item) => String(item).trim())
         .filter((item) => item.length > 0)
-        .slice(0, 10);
+        .slice(0, 5);
 
-      if (normalized.length < 10) {
+      if (normalized.length < 5) {
         throw new Error(
-          `LLM returned only ${normalized.length} keywords for "${seed}"; expected 10.`,
+          `LLM returned only ${normalized.length} keywords for "${seed}"; expected 5.`,
         );
       }
 

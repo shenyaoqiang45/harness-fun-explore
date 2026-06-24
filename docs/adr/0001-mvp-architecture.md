@@ -1,8 +1,8 @@
 # ADR-001: Recursive Clarification Over Single-Shot Retrieval
 
 - **Status:** Accepted
-- **Decision:** Input keyword → expand 10 candidates → rank Top 5 → user clicks to recurse.
-- **Consequence:** Session round state, tree history, and confirm mechanism required.
+- **Decision:** Input keyword → expand 5 candidate keywords → rank Top 5 → user clicks to recurse.
+- **Consequence:** Session round state, tree history, and confirm mechanism required. Five candidates per round (not ten) to halve evidence latency while still showing five leaves.
 
 # ADR-002: Process Transparency Over Black-Box Intelligence
 

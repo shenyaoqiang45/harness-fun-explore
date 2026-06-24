@@ -60,6 +60,7 @@ function createProductionBinding(): EngineBinding {
     defaultEvidenceProvider,
     resolve(session: { llmProvider: LlmProviderId; evidenceProvider: EvidenceProviderId }) {
       const searchEvidence = createEvidenceProvider(session.evidenceProvider, {
+        openAlexApiKey: process.env.OPENALEX_API_KEY,
         openAlexMailto: process.env.OPENALEX_MAILTO,
         semanticScholarApiKey: process.env.SEMANTIC_SCHOLAR_API_KEY,
       });

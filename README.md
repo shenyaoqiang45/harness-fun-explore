@@ -31,7 +31,7 @@ Success is measured by convergence quality, explainability, and reusable explora
 Each round:
 
 1. User picks a focus node
-2. LLM expands 10 candidate keywords
+2. LLM expands 5 candidate keywords
 3. Evidence scoring ranks Top 5
 4. Star-map tree visualizes branches
 5. User clicks a node to recurse—or confirms to freeze the path
@@ -62,7 +62,7 @@ Dark deep-space canvas, gold orbital links, cool-white highlights—exploration 
 
 ## MVP scope
 
-- Seed → 10 candidates → Top 5 tree → recursive clicks
+- Seed → 5 candidates → Top 5 tree → recursive clicks
 - Direction, persona, evidence per round
 - Full trace timeline with tree linkage
 - Confirm / freeze path

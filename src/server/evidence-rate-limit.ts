@@ -27,6 +27,35 @@ export function createSerialGate(minIntervalMs: number) {
   };
 }
 
+/** Cap how many async tasks may run at once (used for polite-pool APIs). */
+export function createConcurrencyLimiter(maxConcurrent: number) {
+  const limit = Math.max(1, maxConcurrent);
+  let active = 0;
+  const queue: Array<() => void> = [];
+
+  function drain(): void {
+    while (active < limit && queue.length > 0) {
+      active += 1;
+      const next = queue.shift();
+      next?.();
+    }
+  }
+
+  return function runLimited<T>(task: () => Promise<T>): Promise<T> {
+    return new Promise((resolve, reject) => {
+      queue.push(() => {
+        void task()
+          .then(resolve, reject)
+          .finally(() => {
+            active -= 1;
+            drain();
+          });
+      });
+      drain();
+    });
+  };
+}
+
 export interface FetchWith429RetryOptions {
   fetchImpl: typeof fetch;
   url: string;

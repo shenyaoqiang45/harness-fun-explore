@@ -185,11 +185,11 @@ export class ExplorationEngine {
       roundId,
       type: "tool-call-start",
       toolName: "expandKeywords",
-      summary: "Expanding into 10 candidates",
+      summary: "Expanding into 5 candidates",
       payload: { rootKeyword: rootNode.keyword, rootNodeId },
     });
 
-    const candidates = (await deps.expandKeywords(rootNode.keyword)).slice(0, 10);
+    const candidates = (await deps.expandKeywords(rootNode.keyword)).slice(0, 5);
     this.traces.append({
       sessionId,
       roundId,

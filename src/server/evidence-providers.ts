@@ -24,6 +24,7 @@ export function resolveDefaultEvidenceProvider(
 }
 
 export interface EvidenceProviderFactoryOptions {
+  openAlexApiKey?: string;
   openAlexMailto?: string;
   semanticScholarApiKey?: string;
   fetchImpl?: typeof fetch;
@@ -43,6 +44,7 @@ export function createEvidenceProvider(
     case "openalex":
       return createOpenAlexEvidenceProvider({
         ...shared,
+        apiKey: options.openAlexApiKey,
         mailto: options.openAlexMailto,
       });
     case "semantic-scholar":
